@@ -1,0 +1,389 @@
+#![no_std]
+
+use sails_rs::{
+    cell::RefCell,
+    client::Program as _,
+    collections::BTreeMap,
+    gstd::msg,
+    prelude::*,
+};
+use session_registry_client::{
+    session_registry::SessionRegistry as SessionRegistryCalls,
+    SessionAction as SessionRegistryAction,
+    SessionRegistryClient,
+    SessionRegistryClientProgram,
+};
+use varix_shared::AccountSnapshot;
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub enum VaultError {
+    InsufficientFreeBalance,
+    InsufficientLockedBalance,
+    SessionRegistryQueryFailed,
+    Unauthorized,
+    ZeroAmount,
+    MarketAlreadyAuthorized,
+    MarketNotAuthorized,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub struct VaultTotals {
+    pub total_free: u128,
+    pub total_locked: u128,
+}
+
+#[sails_rs::event]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub enum VaultEvent {
+    Deposited {
+        trader: ActorId,
+        amount: u128,
+        free_balance: u128,
+    },
+    Withdrawn {
+        trader: ActorId,
+        amount: u128,
+        free_balance: u128,
+    },
+    MarginLocked {
+        market: ActorId,
+        trader: ActorId,
+        amount: u128,
+        account: AccountSnapshot,
+    },
+    MarginReleased {
+        market: ActorId,
+        trader: ActorId,
+        amount: u128,
+        account: AccountSnapshot,
+    },
+    MarginSlashed {
+        market: ActorId,
+        trader: ActorId,
+        amount: u128,
+        account: AccountSnapshot,
+    },
+    MarketAuthorizationChanged {
+        market: ActorId,
+        enabled: bool,
+    },
+}
+
+#[derive(Default)]
+pub struct VaultState {
+    owner: ActorId,
+    session_registry: Option<ActorId>,
+    free_balances: BTreeMap<ActorId, u128>,
+    locked_balances: BTreeMap<ActorId, u128>,
+    authorized_markets: BTreeMap<ActorId, bool>,
+}
+
+pub struct VaultService<'a> {
+    state: &'a RefCell<VaultState>,
+}
+
+impl<'a> VaultService<'a> {
+    pub fn new(state: &'a RefCell<VaultState>) -> Self {
+        Self { state }
+    }
+
+    fn require_owner(state: &VaultState) -> Result<(), VaultError> {
+        if msg::source() == state.owner {
+            Ok(())
+        } else {
+            Err(VaultError::Unauthorized)
+        }
+    }
+
+    fn require_market(state: &VaultState) -> Result<(), VaultError> {
+        if state
+            .authorized_markets
+            .get(&msg::source())
+            .copied()
+            .unwrap_or(false)
+        {
+            Ok(())
+        } else {
+            Err(VaultError::Unauthorized)
+        }
+    }
+
+    fn require_positive(amount: u128) -> Result<(), VaultError> {
+        if amount == 0 {
+            Err(VaultError::ZeroAmount)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn resolve_trader(
+        &self,
+        action: SessionRegistryAction,
+    ) -> Result<ActorId, VaultError> {
+        let caller = msg::source();
+        let session_registry = self.state.borrow().session_registry;
+        let Some(session_registry) = session_registry else {
+            return Ok(caller);
+        };
+
+        let session_registry = SessionRegistryClientProgram::client(session_registry);
+        let session_registry = session_registry.session_registry();
+        let owner = session_registry
+            .owner_for(caller)
+            .await
+            .map_err(|_| VaultError::SessionRegistryQueryFailed)?;
+        let Some(owner) = owner else {
+            return Ok(caller);
+        };
+
+        let valid = session_registry
+            .validate(owner, caller, action)
+            .await
+            .map_err(|_| VaultError::SessionRegistryQueryFailed)?;
+        if valid {
+            Ok(owner)
+        } else {
+            Err(VaultError::Unauthorized)
+        }
+    }
+}
+
+#[sails_rs::service(events = VaultEvent)]
+impl VaultService<'_> {
+    #[export(unwrap_result)]
+    pub async fn deposit(&mut self, amount: u128) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let trader = self.resolve_trader(SessionRegistryAction::AddMargin).await?;
+        let mut state = self.state.borrow_mut();
+        let free = state.free_balances.entry(trader).or_default();
+        *free = free.saturating_add(amount);
+
+        let snapshot = AccountSnapshot {
+            free: *free,
+            locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+        };
+        self.emit_event(VaultEvent::Deposited {
+            trader,
+            amount,
+            free_balance: snapshot.free,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub async fn withdraw(&mut self, amount: u128) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let trader = self.resolve_trader(SessionRegistryAction::Withdraw).await?;
+        let mut state = self.state.borrow_mut();
+        let free = state.free_balances.entry(trader).or_default();
+        if *free < amount {
+            return Err(VaultError::InsufficientFreeBalance);
+        }
+        *free -= amount;
+
+        let snapshot = AccountSnapshot {
+            free: *free,
+            locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+        };
+        self.emit_event(VaultEvent::Withdrawn {
+            trader,
+            amount,
+            free_balance: snapshot.free,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub fn authorize_market(&mut self, market: ActorId) -> Result<(), VaultError> {
+        let mut state = self.state.borrow_mut();
+        VaultService::require_owner(&state)?;
+        if state.authorized_markets.insert(market, true).is_some() {
+            return Err(VaultError::MarketAlreadyAuthorized);
+        }
+        self.emit_event(VaultEvent::MarketAuthorizationChanged {
+            market,
+            enabled: true,
+        })
+        .expect("event emission should succeed");
+        Ok(())
+    }
+
+    #[export(unwrap_result)]
+    pub fn revoke_market(&mut self, market: ActorId) -> Result<(), VaultError> {
+        let mut state = self.state.borrow_mut();
+        VaultService::require_owner(&state)?;
+        if state.authorized_markets.remove(&market).is_none() {
+            return Err(VaultError::MarketNotAuthorized);
+        }
+        self.emit_event(VaultEvent::MarketAuthorizationChanged {
+            market,
+            enabled: false,
+        })
+        .expect("event emission should succeed");
+        Ok(())
+    }
+
+    #[export(unwrap_result)]
+    pub fn lock_margin(
+        &mut self,
+        trader: ActorId,
+        amount: u128,
+    ) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let mut state = self.state.borrow_mut();
+        VaultService::require_market(&state)?;
+
+        let free_balance = {
+            let free = state.free_balances.entry(trader).or_default();
+            if *free < amount {
+                return Err(VaultError::InsufficientFreeBalance);
+            }
+            *free -= amount;
+            *free
+        };
+
+        let locked_balance = {
+            let locked = state.locked_balances.entry(trader).or_default();
+            *locked = locked.saturating_add(amount);
+            *locked
+        };
+        let snapshot = AccountSnapshot {
+            free: free_balance,
+            locked: locked_balance,
+        };
+
+        self.emit_event(VaultEvent::MarginLocked {
+            market: msg::source(),
+            trader,
+            amount,
+            account: snapshot,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub fn release_margin(
+        &mut self,
+        trader: ActorId,
+        amount: u128,
+    ) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let mut state = self.state.borrow_mut();
+        VaultService::require_market(&state)?;
+
+        let locked_balance = {
+            let locked = state.locked_balances.entry(trader).or_default();
+            if *locked < amount {
+                return Err(VaultError::InsufficientLockedBalance);
+            }
+            *locked -= amount;
+            *locked
+        };
+
+        let free_balance = {
+            let free = state.free_balances.entry(trader).or_default();
+            *free = free.saturating_add(amount);
+            *free
+        };
+        let snapshot = AccountSnapshot {
+            free: free_balance,
+            locked: locked_balance,
+        };
+
+        self.emit_event(VaultEvent::MarginReleased {
+            market: msg::source(),
+            trader,
+            amount,
+            account: snapshot,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub fn slash_for_liquidation(
+        &mut self,
+        trader: ActorId,
+        amount: u128,
+    ) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let mut state = self.state.borrow_mut();
+        VaultService::require_market(&state)?;
+
+        let free_balance = state.free_balances.get(&trader).copied().unwrap_or_default();
+        let locked_balance = {
+            let locked = state.locked_balances.entry(trader).or_default();
+            if *locked < amount {
+                return Err(VaultError::InsufficientLockedBalance);
+            }
+            *locked -= amount;
+            *locked
+        };
+        let snapshot = AccountSnapshot {
+            free: free_balance,
+            locked: locked_balance,
+        };
+
+        self.emit_event(VaultEvent::MarginSlashed {
+            market: msg::source(),
+            trader,
+            amount,
+            account: snapshot,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export]
+    pub fn account(&self, trader: ActorId) -> AccountSnapshot {
+        let state = self.state.borrow();
+        AccountSnapshot {
+            free: state.free_balances.get(&trader).copied().unwrap_or_default(),
+            locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+        }
+    }
+
+    #[export]
+    pub fn totals(&self) -> VaultTotals {
+        let state = self.state.borrow();
+        VaultTotals {
+            total_free: state.free_balances.values().copied().sum(),
+            total_locked: state.locked_balances.values().copied().sum(),
+        }
+    }
+}
+
+pub struct Program {
+    state: RefCell<VaultState>,
+}
+
+#[sails_rs::program]
+impl Program {
+    pub fn create(owner: ActorId, session_registry: Option<ActorId>) -> Self {
+        Self {
+            state: RefCell::new(VaultState {
+                owner,
+                session_registry,
+                ..Default::default()
+            }),
+        }
+    }
+
+    pub fn vault(&self) -> VaultService<'_> {
+        VaultService::new(&self.state)
+    }
+}
