@@ -1,0 +1,16 @@
+[package]
+name = "margin-vault-app"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Business logic for Varix margin vault collateral accounting"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sails-rs.workspace = true
+session-registry-client.workspace = true
+varix-shared.workspace = true
