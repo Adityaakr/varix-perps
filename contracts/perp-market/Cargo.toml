@@ -1,0 +1,51 @@
+[package]
+name = "perp-market"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "On-chain isolated perpetual market for Varix Perps"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+perp-market-app.workspace = true
+sails-rs.workspace = true
+
+[build-dependencies]
+perp-market-app.workspace = true
+sails-rs = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+perp-market-app.workspace = true
+perp-market-client.workspace = true
+sails-rs = { workspace = true, features = ["gclient", "gtest"] }
+session-registry.workspace = true
+session-registry-client.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+varix-shared.workspace = true
+
+[workspace]
+resolver = "3"
+members = ["app", "client"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["OpenAI"]
+edition = "2024"
+rust-version = "1.91"
+repository = "https://github.com/adityakrx/varix"
+license = "MIT"
+keywords = ["vara", "gear", "sails", "perps", "wasm"]
+categories = ["cryptography::cryptocurrencies", "no-std", "wasm"]
+
+[workspace.dependencies]
+perp-market-app = { version = "0.1.0", path = "app" }
+perp-market-client = { version = "0.1.0", path = "client" }
+sails-rs = "0.10.3"
+session-registry = { version = "0.1.0", path = "../session-registry" }
+session-registry-client = { version = "0.1.0", path = "../session-registry/client" }
+tokio = "1.48.0"
+varix-shared = { version = "0.1.0", path = "../shared" }
