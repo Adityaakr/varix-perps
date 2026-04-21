@@ -1,5 +1,7 @@
 # Varix---Perps-on-Vara
 
+<img width="1498" height="824" alt="Screenshot 2026-04-21 at 9 04 29 PM" src="https://github.com/user-attachments/assets/e1b365e7-a81a-407f-9661-e674bf021295" />
+
 # Varix Perps
 
 Varix Perps is a Vara-native perpetual futures stack built around isolated Sails programs, typed off-chain services, and a Hyperliquid-inspired React terminal.
