@@ -1,0 +1,34 @@
+type Asset = enum {
+  Btc,
+  Eth,
+  Sol,
+};
+
+type OracleQuote = struct {
+  price: u128,
+  timestamp: u64,
+};
+
+constructor {
+  Create : (owner: actor_id);
+};
+
+service Oracle {
+  ConfigureRelayer : (relayer: actor_id, verifying_key: opt [u8, 32]) -> null;
+  SubmitPrice : (asset: Asset, price: u128, timestamp: u64, sig: vec u8) -> OracleQuote;
+  query Quote : (asset: Asset) -> opt OracleQuote;
+
+  events {
+    RelayerConfigured: struct {
+      relayer: actor_id,
+      enabled: bool,
+    };
+    PriceSubmitted: struct {
+      asset: Asset,
+      price: u128,
+      timestamp: u64,
+      relayer: actor_id,
+    };
+  }
+};
+
