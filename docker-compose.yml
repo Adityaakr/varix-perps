@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: varix
+      POSTGRES_USER: varix
+      POSTGRES_PASSWORD: varix
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  indexer:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -lc "corepack enable && pnpm install && pnpm --filter @varix/indexer build && pnpm --filter @varix/indexer start"
+    environment:
+      INDEXER_PORT: 4301
+      VARA_RPC_URL: ${VARA_RPC_URL:-wss://testnet.vara.network}
+      POSTGRES_URL: postgres://varix:varix@postgres:5432/varix
+      SNAPSHOT_INTERVAL_MS: 1000
+      FUNDING_INTERVAL_MS: ${FUNDING_INTERVAL_MS:-60000}
+      INITIAL_COLLATERAL_USDC: ${INITIAL_COLLATERAL_USDC:-10000}
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - postgres
+    ports:
+      - "4301:4301"
+
+  oracle-relay:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -lc "corepack enable && pnpm install && pnpm --filter @varix/oracle-relay build && pnpm --filter @varix/oracle-relay start"
+    environment:
+      VARA_RPC_URL: ${VARA_RPC_URL:-wss://testnet.vara.network}
+      INDEXER_HTTP_URL: http://indexer:4301
+      ORACLE_POLL_INTERVAL_MS: 2000
+      RELAYER_PRIVATE_KEY_PEM: ${RELAYER_PRIVATE_KEY_PEM:-}
+      ORACLE_SERVICE_PROGRAM_ID: ${ORACLE_SERVICE_PROGRAM_ID:-}
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - indexer
+
+  liquidation-watcher:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -lc "corepack enable && pnpm install && pnpm --filter @varix/liquidation-watcher build && pnpm --filter @varix/liquidation-watcher start"
+    environment:
+      INDEXER_HTTP_URL: http://indexer:4301
+      VARA_RPC_URL: ${VARA_RPC_URL:-wss://testnet.vara.network}
+      LIQUIDATION_POLL_INTERVAL_MS: 3000
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - indexer
+
+  market-data-proxy:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -lc "corepack enable && pnpm install && pnpm --filter @varix/market-data-proxy build && pnpm --filter @varix/market-data-proxy start"
+    environment:
+      MARKET_DATA_PROXY_PORT: 4302
+      HYPERLIQUID_INFO_URL: https://api.hyperliquid.xyz/info
+      DEFAULT_INTERVAL: 5m
+      INDEXER_HTTP_URL: http://indexer:4301
+      MARKET_REFRESH_INTERVAL_MS: 4000
+    volumes:
+      - ./:/workspace
+    ports:
+      - "4302:4302"
+
+  web:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -lc "corepack enable && pnpm install && pnpm --filter @varix/web build && pnpm --filter @varix/web start"
+    environment:
+      VITE_INDEXER_HTTP_URL: http://localhost:4301
+      VITE_INDEXER_WS_URL: ws://localhost:4301
+      VITE_MARKET_DATA_HTTP_URL: http://localhost:4302
+      VITE_MARKET_DATA_WS_URL: ws://localhost:4302
+      VITE_VARA_RPC_URL: ${VARA_RPC_URL:-wss://testnet.vara.network}
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - indexer
+      - market-data-proxy
+    ports:
+      - "4173:4173"
+
+volumes:
+  postgres-data:
