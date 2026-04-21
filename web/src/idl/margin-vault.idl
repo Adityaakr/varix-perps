@@ -1,0 +1,60 @@
+type AccountSnapshot = struct {
+  free: u128,
+  locked: u128,
+};
+
+type VaultTotals = struct {
+  total_free: u128,
+  total_locked: u128,
+};
+
+constructor {
+  Create : (owner: actor_id, session_registry: opt actor_id);
+};
+
+service Vault {
+  AuthorizeMarket : (market: actor_id) -> null;
+  Deposit : (amount: u128) -> AccountSnapshot;
+  LockMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
+  ReleaseMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
+  RevokeMarket : (market: actor_id) -> null;
+  SlashForLiquidation : (trader: actor_id, amount: u128) -> AccountSnapshot;
+  Withdraw : (amount: u128) -> AccountSnapshot;
+  query Account : (trader: actor_id) -> AccountSnapshot;
+  query Totals : () -> VaultTotals;
+
+  events {
+    Deposited: struct {
+      trader: actor_id,
+      amount: u128,
+      free_balance: u128,
+    };
+    Withdrawn: struct {
+      trader: actor_id,
+      amount: u128,
+      free_balance: u128,
+    };
+    MarginLocked: struct {
+      market: actor_id,
+      trader: actor_id,
+      amount: u128,
+      account: AccountSnapshot,
+    };
+    MarginReleased: struct {
+      market: actor_id,
+      trader: actor_id,
+      amount: u128,
+      account: AccountSnapshot,
+    };
+    MarginSlashed: struct {
+      market: actor_id,
+      trader: actor_id,
+      amount: u128,
+      account: AccountSnapshot,
+    };
+    MarketAuthorizationChanged: struct {
+      market: actor_id,
+      enabled: bool,
+    };
+  }
+};
