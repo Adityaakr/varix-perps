@@ -1,0 +1,15 @@
+[package]
+name = "market-factory-app"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Business logic for Varix market registry"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sails-rs.workspace = true
+varix-shared.workspace = true
