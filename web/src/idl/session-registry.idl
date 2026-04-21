@@ -1,0 +1,43 @@
+type SessionPermissions = struct {
+  trade: bool,
+  add_margin: bool,
+  withdraw: bool,
+};
+
+type SessionRecord = struct {
+  owner: actor_id,
+  session_key: actor_id,
+  expires_at: u32,
+  permissions: SessionPermissions,
+  registered_at: u32,
+};
+
+type SessionAction = enum {
+  Trade,
+  AddMargin,
+  Withdraw,
+};
+
+constructor {
+  New : ();
+};
+
+service SessionRegistry {
+  RegisterSession : (session_key: actor_id, expires_at: u32, permissions: SessionPermissions) -> SessionRecord;
+  RevokeSession : (session_key: actor_id) -> bool;
+  query ActiveSession : (owner: actor_id) -> opt SessionRecord;
+  query OwnerFor : (session_key: actor_id) -> opt actor_id;
+  query Validate : (owner: actor_id, session_key: actor_id, action: SessionAction) -> bool;
+
+  events {
+    SessionRegistered: struct {
+      owner: actor_id,
+      session_key: actor_id,
+      expires_at: u32,
+    };
+    SessionRevoked: struct {
+      owner: actor_id,
+      session_key: actor_id,
+    };
+  }
+};

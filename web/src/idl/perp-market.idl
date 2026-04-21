@@ -1,0 +1,97 @@
+type MarketConfig = struct {
+  owner: actor_id,
+  asset: Asset,
+  oracle_service: opt actor_id,
+  margin_vault: opt actor_id,
+  session_registry: opt actor_id,
+  risk: MarketRiskConfig,
+};
+
+type Asset = enum {
+  Btc,
+  Eth,
+  Sol,
+};
+type MarketRiskConfig = struct {
+  initial_margin_bps: u16,
+  maintenance_margin_bps: u16,
+  max_leverage: u8,
+  funding_interval_blocks: u32,
+  liquidation_delay_blocks: u32,
+  max_funding_velocity_bps: i16,
+};
+
+type Position = struct {
+  size: i128,
+  entry_price: u128,
+  margin: u128,
+  leverage: u8,
+  last_funding_rate_bps: i128,
+  opened_at: u64,
+};
+
+type ClosedPosition = struct {
+  realized_pnl: i128,
+  funding_paid: i128,
+  remaining_margin: u128,
+};
+
+type Side = enum {
+  Long,
+  Short,
+};
+
+type MarketSnapshot = struct {
+  mark_price: u128,
+  index_price: u128,
+  funding_rate_bps: i128,
+  cumulative_funding_rate_bps: i128,
+  open_interest_long: u128,
+  open_interest_short: u128,
+};
+
+constructor {
+  Create : (config: MarketConfig, initial_mark_price: u128, initial_index_price: u128);
+};
+
+service Market {
+  AddMargin : (amount: u128) -> Position;
+  CheckLiquidation : (trader: actor_id) -> bool;
+  ClosePosition : (size: u128) -> ClosedPosition;
+  OpenPosition : (side: Side, size: u128, leverage: u8, margin: u128, _max_slippage_bps: u16) -> Position;
+  SettleFunding : () -> MarketSnapshot;
+  UpdatePrice : (mark_price: u128, index_price: u128) -> MarketSnapshot;
+  query Config : () -> MarketConfig;
+  query MarketState : () -> MarketSnapshot;
+  query Position : (trader: actor_id) -> opt Position;
+
+  events {
+    PriceUpdated: struct {
+      mark_price: u128,
+      index_price: u128,
+    };
+    PositionOpened: struct {
+      trader: actor_id,
+      position: Position,
+    };
+    PositionClosed: struct {
+      trader: actor_id,
+      close: ClosedPosition,
+    };
+    MarginAdded: struct {
+      trader: actor_id,
+      new_margin: u128,
+    };
+    FundingSettled: struct {
+      funding_rate_bps: i128,
+      cumulative_funding_rate_bps: i128,
+      block: u32,
+    };
+    Liquidated: struct {
+      trader: actor_id,
+      mark_price: u128,
+      equity: i128,
+      maintenance_margin: u128,
+    };
+  }
+};
