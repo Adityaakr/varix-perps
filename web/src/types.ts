@@ -74,6 +74,14 @@ export type OrderBookSnapshot = {
   asks: OrderBookLevel[];
 };
 
+export type RecentTrade = {
+  asset: Asset;
+  price: number;
+  size: number;
+  side: "buy" | "sell";
+  timestamp: number;
+};
+
 export type EngineSnapshot = {
   markets: MarketSnapshot[];
   positions: PositionSnapshot[];
@@ -82,6 +90,7 @@ export type EngineSnapshot = {
   liquidityPool: {
     totalLiquidity: string;
     maxOpenNotional: string;
+    reservedNotional: string;
   };
   account: AccountSnapshot | null;
   session: SessionSnapshot | null;
@@ -90,6 +99,18 @@ export type EngineSnapshot = {
 export type VaraAccountSnapshot = {
   free: bigint;
   locked: bigint;
+};
+
+export type VaraLpAccount = {
+  shares: bigint;
+  deposited: bigint;
+};
+
+export type VaraPoolState = {
+  total_liquidity: bigint;
+  total_shares: bigint;
+  reserved_notional: bigint;
+  max_capacity: bigint;
 };
 
 export type VaraPositionSnapshot = {

@@ -1,0 +1,60 @@
+type LpAccount = struct {
+  shares: u128,
+  deposited: u128,
+};
+
+type PoolState = struct {
+  total_liquidity: u128,
+  total_shares: u128,
+  reserved_notional: u128,
+  max_capacity: u128,
+};
+
+constructor {
+  Create : (owner: actor_id, token_program: actor_id, capacity_multiplier_bps: u16);
+};
+
+service Pool {
+  AuthorizeMarket : (market: actor_id) -> null;
+  DepositLiquidity : (amount: u128) -> LpAccount;
+  PayOutToVault : (vault: actor_id, amount: u128) -> PoolState;
+  ReleaseNotional : (amount: u128) -> PoolState;
+  ReserveNotional : (amount: u128) -> PoolState;
+  RevokeMarket : (market: actor_id) -> null;
+  WithdrawLiquidity : (shares: u128) -> LpAccount;
+  query Account : (provider: actor_id) -> LpAccount;
+  query PoolState : () -> PoolState;
+
+  events {
+    LiquidityDeposited: struct {
+      provider: actor_id,
+      amount: u128,
+      shares: u128,
+    };
+    LiquidityWithdrawn: struct {
+      provider: actor_id,
+      amount: u128,
+      shares: u128,
+    };
+    CapacityReserved: struct {
+      market: actor_id,
+      amount: u128,
+      reserved_notional: u128,
+    };
+    CapacityReleased: struct {
+      market: actor_id,
+      amount: u128,
+      reserved_notional: u128,
+    };
+    ProfitPaidToVault: struct {
+      market: actor_id,
+      vault: actor_id,
+      amount: u128,
+    };
+    MarketAuthorizationChanged: struct {
+      market: actor_id,
+      enabled: bool,
+    };
+  }
+};
+
