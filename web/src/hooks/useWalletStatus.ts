@@ -7,10 +7,11 @@ type WalletStatus = {
   isConnected: boolean;
   isReady: boolean;
   connect: () => Promise<void>;
+  disconnect: () => void;
 };
 
 export function useWalletStatus(): WalletStatus {
-  const { account, isAccountReady, isAnyWallet, login, wallets } = useAccount();
+  const { account, isAccountReady, isAnyWallet, login, logout, wallets } = useAccount();
 
   async function connect() {
     if (!wallets || !Object.keys(wallets).length) {
@@ -32,6 +33,10 @@ export function useWalletStatus(): WalletStatus {
     }
   }
 
+  function disconnect() {
+    logout();
+  }
+
   if (!isAccountReady) {
     return {
       accountLabel: null,
@@ -39,7 +44,8 @@ export function useWalletStatus(): WalletStatus {
       disabledReason: "Wallet discovery is still loading.",
       isConnected: false,
       isReady: false,
-      connect
+      connect,
+      disconnect
     };
   }
 
@@ -50,7 +56,8 @@ export function useWalletStatus(): WalletStatus {
       disabledReason: "No Vara-compatible wallet extension was found.",
       isConnected: false,
       isReady: false,
-      connect
+      connect,
+      disconnect
     };
   }
 
@@ -61,7 +68,8 @@ export function useWalletStatus(): WalletStatus {
       disabledReason: "A wallet extension exists, but no account is connected yet.",
       isConnected: false,
       isReady: true,
-      connect
+      connect,
+      disconnect
     };
   }
 
@@ -70,7 +78,8 @@ export function useWalletStatus(): WalletStatus {
     connectLabel: "Wallet Connected",
     disabledReason: null,
     isConnected: true,
-    isReady: false,
-    connect
+    isReady: true,
+    connect,
+    disconnect
   };
 }

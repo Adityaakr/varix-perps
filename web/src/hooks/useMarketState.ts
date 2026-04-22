@@ -10,7 +10,8 @@ export function useMarketState(asset: MarketSnapshot["asset"], sessionToken: str
     insuranceFund: "0.00",
     liquidityPool: {
       totalLiquidity: "0.00",
-      maxOpenNotional: "0.00"
+      maxOpenNotional: "0.00",
+      reservedNotional: "0.00"
     },
     account: null,
     session: null
@@ -21,6 +22,10 @@ export function useMarketState(asset: MarketSnapshot["asset"], sessionToken: str
   }, []);
 
   useEffect(() => {
+    if (!sessionToken) {
+      return;
+    }
+
     let active = true;
     const wsUrl = new URL(INDEXER_WS_URL);
     if (sessionToken) {
@@ -48,7 +53,17 @@ export function useMarketState(asset: MarketSnapshot["asset"], sessionToken: str
           return;
         }
         setSnapshot(next);
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setSnapshot((current) => current);
       });
+
+    socket.onerror = () => {
+      socket.close();
+    };
 
     return () => {
       active = false;

@@ -17,6 +17,47 @@ function getLookbackWindow(interval: string) {
   }
 }
 
+type HyperliquidCandle = Candle | {
+  t: number | string;
+  T?: number | string;
+  c: number | string;
+  h: number | string;
+  l: number | string;
+  o: number | string;
+  v?: number | string;
+};
+
+function toNumber(value: number | string | undefined) {
+  if (typeof value === "number") {
+    return value;
+  }
+  return value === undefined ? undefined : Number(value);
+}
+
+function normalizeCandle(candle: HyperliquidCandle): Candle | null {
+  const t = toNumber(candle.t);
+  const T = toNumber(candle.T);
+  const c = toNumber(candle.c);
+  const h = toNumber(candle.h);
+  const l = toNumber(candle.l);
+  const o = toNumber(candle.o);
+  const v = toNumber(candle.v);
+
+  if (![t, c, h, l, o].every((item) => Number.isFinite(item))) {
+    return null;
+  }
+
+  return {
+    t: t!,
+    c: c!,
+    h: h!,
+    l: l!,
+    o: o!,
+    ...(T !== undefined ? { T } : {}),
+    ...(v !== undefined ? { v } : {})
+  };
+}
+
 export function useCandles(asset: Asset, interval = "1h") {
   const [candles, setCandles] = useState<Candle[]>([]);
 
@@ -44,9 +85,13 @@ export function useCandles(asset: Asset, interval = "1h") {
       })
     })
       .then((response) => response.json())
-      .then((payload: Candle[]) => {
+      .then((payload: HyperliquidCandle[]) => {
         if (active) {
-          setCandles(payload);
+          setCandles(
+            payload
+              .map(normalizeCandle)
+              .filter((item): item is Candle => item !== null)
+          );
         }
       })
       .catch(() => {
@@ -80,7 +125,7 @@ export function useCandles(asset: Asset, interval = "1h") {
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as {
           channel?: string;
-          data?: Candle | Candle[];
+          data?: HyperliquidCandle | HyperliquidCandle[];
         };
         if (!active || payload.channel !== "candle" || !payload.data) {
           return;
@@ -89,7 +134,11 @@ export function useCandles(asset: Asset, interval = "1h") {
         const updates = Array.isArray(payload.data) ? payload.data : [payload.data];
         setCandles((current) => {
           const next = [...current];
-          for (const candle of updates) {
+          for (const rawCandle of updates) {
+            const candle = normalizeCandle(rawCandle);
+            if (!candle) {
+              continue;
+            }
             const existingIndex = next.findIndex((item) => item.t === candle.t);
             if (existingIndex >= 0) {
               next[existingIndex] = candle;
