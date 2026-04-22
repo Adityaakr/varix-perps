@@ -1,3 +1,6 @@
+use demo_usdc_vft_client::{token::Token, DemoUsdcVftClient, DemoUsdcVftClientCtors, DemoUsdcVftClientProgram};
+use liquidity_pool_client::{LiquidityPoolClient, LiquidityPoolClientCtors, LiquidityPoolClientProgram, pool::*};
+use margin_vault_client::{MarginVaultClient, MarginVaultClientCtors, MarginVaultClientProgram, vault::*};
 use perp_market_client::{
     Asset, MarketConfig, MarketRiskConfig, PerpMarketClient, PerpMarketClientCtors,
     PerpMarketClientProgram, Side, market::*,
@@ -14,6 +17,7 @@ use session_registry_client::{
 const OWNER: u64 = 1;
 const TRADER: u64 = 42;
 const SESSION: u64 = 99;
+const LP: u64 = 77;
 
 fn risk_config() -> MarketRiskConfig {
     MarketRiskConfig {
@@ -33,20 +37,40 @@ async fn market_opens_settles_funding_and_liquidates() {
     system.mint_to(OWNER, 1_000_000_000_000_000);
     system.mint_to(TRADER, 1_000_000_000_000_000);
     system.mint_to(SESSION, 1_000_000_000_000_000);
+    system.mint_to(LP, 1_000_000_000_000_000);
+    let token_code_id = system.submit_code(demo_usdc_vft::WASM_BINARY);
+    let vault_code_id = system.submit_code(margin_vault::WASM_BINARY);
+    let pool_code_id = system.submit_code(liquidity_pool::WASM_BINARY);
     let code_id = system.submit_code(perp_market::WASM_BINARY);
     let session_registry_code_id = system.submit_code(session_registry::WASM_BINARY);
 
     let owner_env = GtestEnv::new(system, OWNER.into());
+    let token = owner_env
+        .deploy::<DemoUsdcVftClientProgram>(token_code_id, b"token".to_vec())
+        .create(OWNER.into(), "Demo USDC".into(), "dUSDC".into(), 6)
+        .await
+        .unwrap();
     let session_registry = owner_env
         .deploy::<SessionRegistryClientProgram>(session_registry_code_id, b"sessions".to_vec())
         .new()
+        .await
+        .unwrap();
+    let vault = owner_env
+        .deploy::<MarginVaultClientProgram>(vault_code_id, b"vault".to_vec())
+        .create(OWNER.into(), Some(session_registry.id()), Some(token.id()))
+        .await
+        .unwrap();
+    let pool = owner_env
+        .deploy::<LiquidityPoolClientProgram>(pool_code_id, b"pool".to_vec())
+        .create(OWNER.into(), token.id(), 50_000)
         .await
         .unwrap();
     let config = MarketConfig {
         owner: OWNER.into(),
         asset: Asset::Btc,
         oracle_service: None,
-        margin_vault: None,
+        margin_vault: Some(vault.id()),
+        liquidity_pool: Some(pool.id()),
         session_registry: Some(session_registry.id()),
         risk: risk_config(),
     };
@@ -56,7 +80,31 @@ async fn market_opens_settles_funding_and_liquidates() {
         .await
         .unwrap();
 
+    vault.vault().authorize_market(program.id()).await.unwrap();
+    pool.pool().authorize_market(program.id()).await.unwrap();
+
     let trader_env = owner_env.clone().with_actor_id(TRADER.into());
+    let lp_env = owner_env.clone().with_actor_id(LP.into());
+    let trader_token = Actor::<DemoUsdcVftClientProgram, _>::new(trader_env.clone(), token.id());
+    let mut trader_token_service = trader_token.token();
+    trader_token_service.mint(20_000_000_000).await.unwrap();
+    trader_token_service.approve(vault.id(), 20_000_000_000).await.unwrap();
+    Actor::<MarginVaultClientProgram, _>::new(trader_env.clone(), vault.id())
+        .vault()
+        .deposit(12_000_000_000)
+        .await
+        .unwrap();
+
+    let lp_token = Actor::<DemoUsdcVftClientProgram, _>::new(lp_env.clone(), token.id());
+    let mut lp_token_service = lp_token.token();
+    lp_token_service.mint(50_000_000_000).await.unwrap();
+    lp_token_service.approve(pool.id(), 50_000_000_000).await.unwrap();
+    Actor::<LiquidityPoolClientProgram, _>::new(lp_env.clone(), pool.id())
+        .pool()
+        .deposit_liquidity(50_000_000_000)
+        .await
+        .unwrap();
+
     let trader_program = Actor::<PerpMarketClientProgram, _>::new(trader_env.clone(), program.id());
     let mut trader_market = trader_program.market();
     trader_market
@@ -98,6 +146,16 @@ async fn market_opens_settles_funding_and_liquidates() {
         .await
         .unwrap();
 
+    trader_token_service.mint(12_000_000_000).await.unwrap();
+    trader_token_service.approve(vault.id(), 12_000_000_000).await.unwrap();
+    let session_vault_actor =
+        Actor::<MarginVaultClientProgram, _>::new(owner_env.clone().with_actor_id(SESSION.into()), vault.id());
+    session_vault_actor
+        .vault()
+        .deposit(12_000_000_000)
+        .await
+        .unwrap();
+
     let session_env = owner_env.clone().with_actor_id(SESSION.into());
     let session_program = Actor::<PerpMarketClientProgram, _>::new(session_env.clone(), program.id());
     let mut session_market = session_program.market();
@@ -111,4 +169,5 @@ async fn market_opens_settles_funding_and_liquidates() {
 
     let closed = session_market.close_position(100_000_000).await.unwrap();
     assert_eq!(closed.remaining_margin, 0);
+    assert_eq!(vault.vault().account(TRADER.into()).await.unwrap().locked, 0);
 }
