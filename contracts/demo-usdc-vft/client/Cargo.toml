@@ -1,0 +1,18 @@
+[package]
+name = "demo-usdc-vft-client"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Generated Rust client for demo USDC VFT"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sails-rs.workspace = true
+
+[build-dependencies]
+demo-usdc-vft-app.workspace = true
+sails-rs = { workspace = true, features = ["build"] }

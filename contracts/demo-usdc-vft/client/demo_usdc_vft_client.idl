@@ -1,0 +1,35 @@
+constructor {
+  Create : (owner: actor_id, name: str, symbol: str, decimals: u8);
+};
+
+service Token {
+  Approve : (spender: actor_id, value: u128) -> bool;
+  Mint : (amount: u128) -> u128;
+  MintTo : (to: actor_id, amount: u128) -> u128;
+  Transfer : (to: actor_id, value: u128) -> bool;
+  TransferFrom : (from: actor_id, to: actor_id, value: u128) -> bool;
+  query Allowance : (owner: actor_id, spender: actor_id) -> u128;
+  query BalanceOf : (owner: actor_id) -> u128;
+  query Decimals : () -> u8;
+  query Name : () -> str;
+  query Symbol : () -> str;
+  query TotalSupply : () -> u128;
+
+  events {
+    Transfer: struct {
+      from: actor_id,
+      to: actor_id,
+      value: u128,
+    };
+    Approval: struct {
+      owner: actor_id,
+      spender: actor_id,
+      value: u128,
+    };
+    Minted: struct {
+      to: actor_id,
+      value: u128,
+    };
+  }
+};
+
