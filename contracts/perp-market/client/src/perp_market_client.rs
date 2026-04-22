@@ -208,6 +208,7 @@ pub struct MarketConfig {
     pub asset: Asset,
     pub oracle_service: Option<ActorId>,
     pub margin_vault: Option<ActorId>,
+    pub liquidity_pool: Option<ActorId>,
     pub session_registry: Option<ActorId>,
     pub risk: MarketRiskConfig,
 }
@@ -247,6 +248,8 @@ pub struct Position {
 pub struct ClosedPosition {
     pub realized_pnl: i128,
     pub funding_paid: i128,
+    pub released_margin: u128,
+    pub payout: u128,
     pub remaining_margin: u128,
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]

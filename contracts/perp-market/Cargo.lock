@@ -1367,6 +1367,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "930c7171c8df9fb1782bdf9b918ed9ed2d33d1d22300abb754f9085bc48bf8e8"
 
 [[package]]
+name = "demo-usdc-vft"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-app",
+ "sails-rs",
+]
+
+[[package]]
+name = "demo-usdc-vft-app"
+version = "0.1.0"
+dependencies = [
+ "sails-rs",
+]
+
+[[package]]
+name = "demo-usdc-vft-client"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-app",
+ "sails-rs",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3961,6 +3984,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "liquidity-pool"
+version = "0.1.0"
+dependencies = [
+ "liquidity-pool-app",
+ "sails-rs",
+]
+
+[[package]]
+name = "liquidity-pool-app"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-client",
+ "sails-rs",
+]
+
+[[package]]
+name = "liquidity-pool-client"
+version = "0.1.0"
+dependencies = [
+ "liquidity-pool-app",
+ "sails-rs",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4097,6 +4144,32 @@ dependencies = [
  "macro_magic_core",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "margin-vault"
+version = "0.1.0"
+dependencies = [
+ "margin-vault-app",
+ "sails-rs",
+]
+
+[[package]]
+name = "margin-vault-app"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-client",
+ "sails-rs",
+ "session-registry-client",
+ "varix-shared",
+]
+
+[[package]]
+name = "margin-vault-client"
+version = "0.1.0"
+dependencies = [
+ "margin-vault-app",
+ "sails-rs",
 ]
 
 [[package]]
@@ -4655,6 +4728,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perp-market"
 version = "0.1.0"
 dependencies = [
+ "demo-usdc-vft",
+ "demo-usdc-vft-client",
+ "liquidity-pool",
+ "liquidity-pool-client",
+ "margin-vault",
+ "margin-vault-client",
  "perp-market-app",
  "perp-market-client",
  "sails-rs",
@@ -4668,6 +4747,8 @@ dependencies = [
 name = "perp-market-app"
 version = "0.1.0"
 dependencies = [
+ "liquidity-pool-client",
+ "margin-vault-client",
  "sails-rs",
  "session-registry-client",
  "varix-shared",

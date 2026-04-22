@@ -11,6 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+liquidity-pool-client.workspace = true
+margin-vault-client.workspace = true
 sails-rs.workspace = true
 session-registry-client.workspace = true
 varix-shared.workspace = true

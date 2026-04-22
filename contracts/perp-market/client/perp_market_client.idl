@@ -3,6 +3,7 @@ type MarketConfig = struct {
   asset: Asset,
   oracle_service: opt actor_id,
   margin_vault: opt actor_id,
+  liquidity_pool: opt actor_id,
   session_registry: opt actor_id,
   risk: MarketRiskConfig,
 };
@@ -34,6 +35,8 @@ type Position = struct {
 type ClosedPosition = struct {
   realized_pnl: i128,
   funding_paid: i128,
+  released_margin: u128,
+  payout: u128,
   remaining_margin: u128,
 };
 
