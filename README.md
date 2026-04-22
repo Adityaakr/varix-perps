@@ -678,7 +678,3 @@ If you add more local-node integration tests, keep them clearly separated from p
 - [docs/plans/2026-04-22-varix-vft-perps-tasks.md](docs/plans/2026-04-22-varix-vft-perps-tasks.md)
 
 ---
-
-## License
-
-This repository does not currently include a license file. Add a `LICENSE` when you decide the distribution terms for Varix.
