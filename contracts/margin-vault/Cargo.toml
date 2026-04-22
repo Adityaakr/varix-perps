@@ -19,6 +19,8 @@ margin-vault-app.workspace = true
 sails-rs = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
+demo-usdc-vft.workspace = true
+demo-usdc-vft-client.workspace = true
 margin-vault-app.workspace = true
 margin-vault-client.workspace = true
 sails-rs = { workspace = true, features = ["gclient", "gtest"] }
@@ -41,6 +43,8 @@ keywords = ["vara", "gear", "sails", "perps", "wasm"]
 categories = ["cryptography::cryptocurrencies", "no-std", "wasm"]
 
 [workspace.dependencies]
+demo-usdc-vft = { version = "0.1.0", path = "../demo-usdc-vft" }
+demo-usdc-vft-client = { version = "0.1.0", path = "../demo-usdc-vft/client" }
 margin-vault-app = { version = "0.1.0", path = "app" }
 margin-vault-client = { version = "0.1.0", path = "client" }
 sails-rs = "0.10.3"

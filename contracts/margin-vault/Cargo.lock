@@ -1367,6 +1367,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "930c7171c8df9fb1782bdf9b918ed9ed2d33d1d22300abb754f9085bc48bf8e8"
 
 [[package]]
+name = "demo-usdc-vft"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-app",
+ "sails-rs",
+]
+
+[[package]]
+name = "demo-usdc-vft-app"
+version = "0.1.0"
+dependencies = [
+ "sails-rs",
+]
+
+[[package]]
+name = "demo-usdc-vft-client"
+version = "0.1.0"
+dependencies = [
+ "demo-usdc-vft-app",
+ "sails-rs",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4103,6 +4126,8 @@ dependencies = [
 name = "margin-vault"
 version = "0.1.0"
 dependencies = [
+ "demo-usdc-vft",
+ "demo-usdc-vft-client",
  "margin-vault-app",
  "margin-vault-client",
  "sails-rs",
@@ -4115,6 +4140,7 @@ dependencies = [
 name = "margin-vault-app"
 version = "0.1.0"
 dependencies = [
+ "demo-usdc-vft-client",
  "sails-rs",
  "session-registry-client",
  "varix-shared",

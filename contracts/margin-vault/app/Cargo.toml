@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+demo-usdc-vft-client.workspace = true
 sails-rs.workspace = true
 session-registry-client.workspace = true
 varix-shared.workspace = true
