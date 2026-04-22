@@ -16,3 +16,5 @@ web/dist/
 web/.vite/
 
 docker-data/
+.pnpm-store/
+.tools/
