@@ -2,45 +2,64 @@ type WalletPanelProps = {
   accountLabel: string | null;
   connectLabel: string;
   disabledReason: string | null;
-  mode: "demo" | "vara";
   onClearSession?: (() => void) | null;
   onConnect: () => void;
+  onDisconnect?: (() => void) | null;
+  onFundGas?: (() => void) | null;
   ready: boolean;
   sessionLabel?: string | null;
 };
 
-export function WalletPanel({ accountLabel, connectLabel, disabledReason, mode, onClearSession, onConnect, ready, sessionLabel }: WalletPanelProps) {
+export function WalletPanel({
+  accountLabel,
+  connectLabel,
+  disabledReason,
+  onClearSession,
+  onConnect,
+  onDisconnect,
+  onFundGas,
+  ready,
+  sessionLabel
+}: WalletPanelProps) {
   return (
     <section className="wallet-panel terminal-panel">
       <div className="panel-header">
-        <h2>{mode === "vara" ? "Vara Wallet" : "Demo Session"}</h2>
+        <h2>Vara Wallet</h2>
         <span className={`status-pill ${ready ? "is-live" : ""}`}>{ready ? "Ready" : "Waiting"}</span>
       </div>
       <dl className="wallet-grid">
         <div>
           <dt>Runtime</dt>
-          <dd>{mode === "vara" ? "On-chain" : "Local demo"}</dd>
+          <dd>On-chain</dd>
         </div>
         <div>
           <dt>Identity</dt>
-          <dd>{accountLabel ?? (mode === "vara" ? "Not connected" : "No session")}</dd>
+          <dd>{accountLabel ?? "Not connected"}</dd>
         </div>
-        {mode === "vara" ? (
-          <div>
-            <dt>Session</dt>
-            <dd>{sessionLabel ?? "Not registered"}</dd>
-          </div>
-        ) : null}
+        <div>
+          <dt>Session</dt>
+          <dd>{sessionLabel ?? "Not registered"}</dd>
+        </div>
       </dl>
       <button className="secondary-button wallet-action" disabled={!ready} onClick={onConnect} type="button">
         {connectLabel}
       </button>
+      {onDisconnect ? (
+        <button className="secondary-button wide-secondary" onClick={onDisconnect} type="button">
+          Disconnect Wallet
+        </button>
+      ) : null}
+      {onFundGas ? (
+        <button className="secondary-button wide-secondary" onClick={onFundGas} type="button">
+          Fund Gas
+        </button>
+      ) : null}
       {onClearSession ? (
         <button className="secondary-button wide-secondary" onClick={onClearSession} type="button">
           Revoke Session
         </button>
       ) : null}
-      <p className="panel-note">{disabledReason ?? (mode === "vara" ? "Wallet is ready for signed transactions." : "Demo mode keeps a local trading session.")}</p>
+      <p className="panel-note">{disabledReason ?? "Wallet is ready for signed transactions."}</p>
     </section>
   );
 }

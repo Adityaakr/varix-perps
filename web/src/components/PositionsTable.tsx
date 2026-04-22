@@ -1,12 +1,25 @@
+import { useState } from "react";
 import type { PositionSnapshot } from "../types";
 import { formatMoney, formatSignedMoney } from "../lib/format";
 
 type PositionsTableProps = {
+  liveMarkPrice: number | null;
   positions: PositionSnapshot[];
   onClose: (asset: PositionSnapshot["asset"]) => Promise<void>;
 };
 
-export function PositionsTable({ positions, onClose }: PositionsTableProps) {
+export function PositionsTable({ liveMarkPrice, positions, onClose }: PositionsTableProps) {
+  const [closingAsset, setClosingAsset] = useState<PositionSnapshot["asset"] | null>(null);
+
+  async function handleClose(asset: PositionSnapshot["asset"]) {
+    setClosingAsset(asset);
+    try {
+      await onClose(asset);
+    } finally {
+      setClosingAsset(null);
+    }
+  }
+
   return (
     <section className="positions-panel terminal-panel">
       <div className="panel-header terminal-header">
@@ -32,19 +45,35 @@ export function PositionsTable({ positions, onClose }: PositionsTableProps) {
           <div className="positions-empty">No open positions for this market yet.</div>
         ) : (
           positions.map((position) => (
-            <div className="positions-row" key={`${position.trader}-${position.asset}`}>
-              <span>{position.asset}</span>
-              <span className={position.side === "long" ? "positive" : "negative"}>{position.side}</span>
-              <span>{formatMoney(position.size, 4)}</span>
-              <span>${formatMoney(position.entryPrice, 1)}</span>
-              <span>${formatMoney(position.notional, 1)}</span>
-              <span className={Number(position.pnl) >= 0 ? "positive" : "negative"}>
-                {formatSignedMoney(position.pnl)}
-              </span>
-              <button className="table-button" onClick={() => void onClose(position.asset)} type="button">
-                Close
-              </button>
-            </div>
+            (() => {
+              const size = Number(position.size);
+              const entryPrice = Number(position.entryPrice);
+              const markPrice = liveMarkPrice ?? entryPrice;
+              const livePnl = position.side === "long"
+                ? size * (markPrice - entryPrice)
+                : size * (entryPrice - markPrice);
+
+              return (
+                <div className="positions-row" key={`${position.trader}-${position.asset}`}>
+                  <span>{position.asset}</span>
+                  <span className={position.side === "long" ? "positive" : "negative"}>{position.side}</span>
+                  <span>{formatMoney(position.size, 4)}</span>
+                  <span>${formatMoney(entryPrice, 1)}</span>
+                  <span>${formatMoney(markPrice, 1)}</span>
+                  <span className={livePnl >= 0 ? "positive" : "negative"}>
+                    {formatSignedMoney(livePnl)}
+                  </span>
+                  <button
+                    className="table-button"
+                    disabled={closingAsset !== null}
+                    onClick={() => void handleClose(position.asset)}
+                    type="button"
+                  >
+                    {closingAsset === position.asset ? "Closing..." : "Close"}
+                  </button>
+                </div>
+              );
+            })()
           ))
         )}
       </div>

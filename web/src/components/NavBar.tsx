@@ -1,11 +1,26 @@
 type NavBarProps = {
   collateral: string;
   identity: string | null;
-  mode: "demo" | "vara";
-  onModeChange: (mode: "demo" | "vara") => void;
+  isConnected: boolean;
+  walletCtaLabel: string;
+  walletCtaDisabled: boolean;
+  walletCtaTitle?: string | null;
+  onDisconnect: () => void;
+  onWalletCta: () => void;
+  onScrollToAccount: () => void;
 };
 
-export function NavBar({ collateral, identity, mode, onModeChange }: NavBarProps) {
+export function NavBar({
+  collateral,
+  identity,
+  isConnected,
+  walletCtaLabel,
+  walletCtaDisabled,
+  walletCtaTitle,
+  onDisconnect,
+  onWalletCta,
+  onScrollToAccount
+}: NavBarProps) {
   return (
     <header className="nav">
       <div className="nav-brand">
@@ -26,24 +41,30 @@ export function NavBar({ collateral, identity, mode, onModeChange }: NavBarProps
         <button className="nav-link" type="button">Leaderboard</button>
       </nav>
       <div className="nav-actions">
-        <button className="deposit-chip" type="button">
+        <button
+          className="nav-wallet-cta"
+          disabled={walletCtaDisabled}
+          onClick={onWalletCta}
+          title={walletCtaTitle ?? undefined}
+          type="button"
+        >
+          {walletCtaLabel}
+        </button>
+        {isConnected ? (
+          <button className="nav-disconnect" onClick={onDisconnect} type="button">
+            Disconnect
+          </button>
+        ) : null}
+        <button className="deposit-chip" onClick={onScrollToAccount} type="button">
           Deposit
         </button>
         <div className="nav-account">
-          <span>{mode === "vara" ? "Wallet" : "Session"}</span>
-          <strong>{identity ?? (mode === "vara" ? "Not connected" : "Not started")}</strong>
+          <span>Wallet</span>
+          <strong>{identity ?? "Not connected"}</strong>
         </div>
         <div className="nav-collateral">
           <span>Collateral</span>
           <strong>{collateral} USDC</strong>
-        </div>
-        <div className="runtime-toggle">
-          <button className={mode === "vara" ? "is-active" : ""} onClick={() => onModeChange("vara")} type="button">
-            Vara
-          </button>
-          <button className={mode === "demo" ? "is-active" : ""} onClick={() => onModeChange("demo")} type="button">
-            Demo
-          </button>
         </div>
       </div>
     </header>

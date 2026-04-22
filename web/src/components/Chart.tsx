@@ -32,30 +32,30 @@ export function Chart({ asset, candles, intervalLabel = "1h", onIntervalChange }
     const chart = createChart(root, {
       autoSize: false,
       layout: {
-        background: { type: ColorType.Solid, color: "#11181d" },
-        textColor: "#7f8b93"
+        background: { type: ColorType.Solid, color: "#090812" },
+        textColor: "#8b84a3"
       },
       grid: {
-        vertLines: { color: "rgba(127, 139, 147, 0.07)" },
-        horzLines: { color: "rgba(127, 139, 147, 0.07)" }
+        vertLines: { color: "rgba(255, 255, 255, 0.03)" },
+        horzLines: { color: "rgba(255, 255, 255, 0.03)" }
       },
       rightPriceScale: {
-        borderColor: "rgba(127, 139, 147, 0.10)"
+        borderColor: "rgba(255, 255, 255, 0.06)"
       },
       timeScale: {
-        borderColor: "rgba(127, 139, 147, 0.10)"
+        borderColor: "rgba(255, 255, 255, 0.06)"
       },
       crosshair: {
-        vertLine: { color: "rgba(133, 239, 207, 0.25)" },
-        horzLine: { color: "rgba(133, 239, 207, 0.2)" }
+        vertLine: { color: "rgba(168, 85, 247, 0.25)" },
+        horzLine: { color: "rgba(168, 85, 247, 0.2)" }
       }
     });
     const series = chart.addSeries(CandlestickSeries, {
-      upColor: "#6ed0c2",
-      downColor: "#e06b6d",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
       borderVisible: false,
-      wickUpColor: "#6ed0c2",
-      wickDownColor: "#e06b6d"
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444"
     });
 
     chartRef.current = chart;
@@ -109,7 +109,7 @@ export function Chart({ asset, candles, intervalLabel = "1h", onIntervalChange }
         </div>
         <div className="chart-tools">
           <span>{intervalLabel}</span>
-          <span>Hyperliquid</span>
+          <span>Live Feed</span>
         </div>
       </div>
       <div className="chart-titlebar">
