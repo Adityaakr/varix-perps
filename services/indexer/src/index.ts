@@ -186,6 +186,7 @@ type EngineSnapshot = {
   liquidityPool: {
     totalLiquidity: string;
     maxOpenNotional: string;
+    reservedNotional: string;
   };
   account: AccountSnapshot | null;
   session: SessionSnapshot | null;
@@ -714,7 +715,8 @@ class Engine {
   private poolSnapshot(): EngineSnapshot["liquidityPool"] {
     return {
       totalLiquidity: formatCollateral(this.liquidityPoolBalance),
-      maxOpenNotional: formatCollateral(this.maxOpenNotional())
+      maxOpenNotional: formatCollateral(this.maxOpenNotional()),
+      reservedNotional: formatCollateral(this.totalOpenNotional())
     };
   }
 }
@@ -920,7 +922,7 @@ async function main(): Promise<void> {
     broadcast(clients, engine);
   }, env.SNAPSHOT_INTERVAL_MS).unref();
 
-  server.listen(env.INDEXER_PORT, "127.0.0.1", () => {
+  server.listen(env.INDEXER_PORT, "0.0.0.0", () => {
     console.log(`[indexer] listening`, {
       port: env.INDEXER_PORT,
       varaRpcUrl: env.VARA_RPC_URL,

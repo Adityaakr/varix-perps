@@ -295,7 +295,7 @@ async function main(): Promise<void> {
     }
   }, env.MARKET_REFRESH_INTERVAL_MS).unref();
 
-  server.listen(env.MARKET_DATA_PROXY_PORT, "127.0.0.1", () => {
+  server.listen(env.MARKET_DATA_PROXY_PORT, "0.0.0.0", () => {
     console.log(`[market-data-proxy] listening`, {
       port: env.MARKET_DATA_PROXY_PORT,
       upstream: env.HYPERLIQUID_INFO_URL,
