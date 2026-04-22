@@ -4,6 +4,8 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "pnpm -r build",
+    "build:local-vara-contracts": "cargo build --manifest-path contracts/session-registry/Cargo.toml && cargo build --manifest-path contracts/demo-usdc-vft/Cargo.toml && cargo build --manifest-path contracts/oracle-service/Cargo.toml && cargo build --manifest-path contracts/margin-vault/Cargo.toml && cargo build --manifest-path contracts/liquidity-pool/Cargo.toml && cargo build --manifest-path contracts/perp-market/Cargo.toml",
+    "deploy:local-vara": "node scripts/deploy-local-vara.cjs",
     "lint": "pnpm -r lint",
     "start": "pnpm -r --parallel start",
     "test": "pnpm -r test",
@@ -12,7 +14,8 @@
     "dev:indexer": "pnpm --filter @varix/indexer dev",
     "dev:oracle": "pnpm --filter @varix/oracle-relay dev",
     "dev:liq": "pnpm --filter @varix/liquidation-watcher dev",
-    "dev:data": "pnpm --filter @varix/market-data-proxy dev"
+    "dev:data": "pnpm --filter @varix/market-data-proxy dev",
+    "dev:check-vara": "sh scripts/check-vara-rpc.sh"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
