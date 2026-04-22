@@ -1,7 +1,6 @@
 # Varix
 
-<img width="1489" height="907" alt="Screenshot 2026-04-22 at 8 17 23 PM" src="https://github.com/user-attachments/assets/37aa285b-2e6f-427f-ae4f-60878d2d75bf" />
-
+<img width="1493" height="893" alt="Screenshot 2026-04-22 at 8 20 35 PM" src="https://github.com/user-attachments/assets/7d02a41a-4a29-4aca-a67d-1141e3d9bab0" />
 
 **Varix** is a perpetual futures protocol and trading terminal designed for **Vara Network**.
 
