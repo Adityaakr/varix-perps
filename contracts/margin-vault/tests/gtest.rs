@@ -1,3 +1,4 @@
+use demo_usdc_vft_client::{token::Token as TokenCalls, DemoUsdcVftClient, DemoUsdcVftClientCtors, DemoUsdcVftClientProgram};
 use margin_vault_client::{
     MarginVaultClient, MarginVaultClientCtors, MarginVaultClientProgram, vault::*,
 };
@@ -22,10 +23,16 @@ async fn vault_handles_deposit_withdraw_and_lock_flow() {
     system.mint_to(TRADER, 100_000_000_000_000);
     system.mint_to(MARKET, 100_000_000_000_000);
     system.mint_to(SESSION, 100_000_000_000_000);
+    let token_code_id = system.submit_code(demo_usdc_vft::WASM_BINARY);
     let code_id = system.submit_code(margin_vault::WASM_BINARY);
     let session_registry_code_id = system.submit_code(session_registry::WASM_BINARY);
 
     let owner_env = GtestEnv::new(system, OWNER.into());
+    let token = owner_env
+        .deploy::<DemoUsdcVftClientProgram>(token_code_id, b"token".to_vec())
+        .create(OWNER.into(), "Demo USDC".into(), "dUSDC".into(), 6)
+        .await
+        .unwrap();
     let session_registry = owner_env
         .deploy::<SessionRegistryClientProgram>(session_registry_code_id, b"sessions".to_vec())
         .new()
@@ -33,12 +40,17 @@ async fn vault_handles_deposit_withdraw_and_lock_flow() {
         .unwrap();
     let program = owner_env
         .deploy::<MarginVaultClientProgram>(code_id, b"vault".to_vec())
-        .create(OWNER.into(), Some(session_registry.id()))
+        .create(OWNER.into(), Some(session_registry.id()), Some(token.id()))
         .await
         .unwrap();
 
     let trader_env = owner_env.clone().with_actor_id(TRADER.into());
     let market_env = owner_env.clone().with_actor_id(MARKET.into());
+
+    let trader_token = Actor::<DemoUsdcVftClientProgram, _>::new(trader_env.clone(), token.id());
+    let mut trader_token_service = trader_token.token();
+    trader_token_service.mint(1_000_000).await.unwrap();
+    trader_token_service.approve(program.id(), 1_000_000).await.unwrap();
 
     let trader_program =
         Actor::<MarginVaultClientProgram, _>::new(trader_env.clone(), program.id());
@@ -85,9 +97,12 @@ async fn vault_handles_deposit_withdraw_and_lock_flow() {
     let session_program =
         Actor::<MarginVaultClientProgram, _>::new(session_env.clone(), program.id());
     let mut session_vault = session_program.vault();
+    trader_token_service.approve(program.id(), 50_000).await.unwrap();
     let session_deposit = session_vault.deposit(50_000).await.unwrap();
     assert_eq!(session_deposit.free, 550_000);
 
     let session_withdraw = session_vault.withdraw(25_000).await.unwrap();
     assert_eq!(session_withdraw.free, 525_000);
+
+    assert_eq!(token.token().balance_of(program.id()).await.unwrap(), 925_000);
 }

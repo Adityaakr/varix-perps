@@ -1,10 +1,15 @@
 #![no_std]
 
+use demo_usdc_vft_client::{
+    token::Token as TokenCalls,
+    DemoUsdcVftClient,
+    DemoUsdcVftClientProgram,
+};
 use sails_rs::{
     cell::RefCell,
     client::Program as _,
     collections::BTreeMap,
-    gstd::msg,
+    gstd::{exec, msg},
     prelude::*,
 };
 use session_registry_client::{
@@ -22,10 +27,12 @@ pub enum VaultError {
     InsufficientFreeBalance,
     InsufficientLockedBalance,
     SessionRegistryQueryFailed,
+    TokenTransferFailed,
     Unauthorized,
     ZeroAmount,
     MarketAlreadyAuthorized,
     MarketNotAuthorized,
+    MissingTokenProgram,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
@@ -50,6 +57,13 @@ pub enum VaultEvent {
         trader: ActorId,
         amount: u128,
         free_balance: u128,
+    },
+    PositionSettled {
+        market: ActorId,
+        trader: ActorId,
+        released_margin: u128,
+        payout: u128,
+        account: AccountSnapshot,
     },
     MarginLocked {
         market: ActorId,
@@ -79,6 +93,7 @@ pub enum VaultEvent {
 pub struct VaultState {
     owner: ActorId,
     session_registry: Option<ActorId>,
+    token_program: Option<ActorId>,
     free_balances: BTreeMap<ActorId, u128>,
     locked_balances: BTreeMap<ActorId, u128>,
     authorized_markets: BTreeMap<ActorId, bool>,
@@ -102,6 +117,12 @@ impl<'a> VaultService<'a> {
     }
 
     fn require_market(state: &VaultState) -> Result<(), VaultError> {
+        // Local dev-node bootstrap is simpler when the first market can interact
+        // before explicit authorization is configured. Once any authorization
+        // exists, only the approved market set is allowed.
+        if state.authorized_markets.is_empty() {
+            return Ok(());
+        }
         if state
             .authorized_markets
             .get(&msg::source())
@@ -161,6 +182,21 @@ impl VaultService<'_> {
         VaultService::require_positive(amount)?;
 
         let trader = self.resolve_trader(SessionRegistryAction::AddMargin).await?;
+        let token_program = self
+            .state
+            .borrow()
+            .token_program
+            .ok_or(VaultError::MissingTokenProgram)?;
+        let token = DemoUsdcVftClientProgram::client(token_program);
+        let mut token = token.token();
+        let transferred = token
+            .transfer_from(trader, exec::program_id(), amount)
+            .await
+            .map_err(|_| VaultError::TokenTransferFailed)?;
+        if !transferred {
+            return Err(VaultError::TokenTransferFailed);
+        }
+
         let mut state = self.state.borrow_mut();
         let free = state.free_balances.entry(trader).or_default();
         *free = free.saturating_add(amount);
@@ -183,21 +219,102 @@ impl VaultService<'_> {
         VaultService::require_positive(amount)?;
 
         let trader = self.resolve_trader(SessionRegistryAction::Withdraw).await?;
-        let mut state = self.state.borrow_mut();
-        let free = state.free_balances.entry(trader).or_default();
-        if *free < amount {
-            return Err(VaultError::InsufficientFreeBalance);
-        }
-        *free -= amount;
+        let (snapshot, token_program) = {
+            let mut state = self.state.borrow_mut();
+            let free = state.free_balances.entry(trader).or_default();
+            if *free < amount {
+                return Err(VaultError::InsufficientFreeBalance);
+            }
+            *free -= amount;
 
-        let snapshot = AccountSnapshot {
-            free: *free,
-            locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+            (
+                AccountSnapshot {
+                    free: *free,
+                    locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+                },
+                state.token_program.ok_or(VaultError::MissingTokenProgram)?,
+            )
         };
+
+        let token = DemoUsdcVftClientProgram::client(token_program);
+        let mut token = token.token();
+        let transferred = token
+            .transfer(trader, amount)
+            .await
+            .map_err(|_| VaultError::TokenTransferFailed)?;
+        if !transferred {
+            return Err(VaultError::TokenTransferFailed);
+        }
+
         self.emit_event(VaultEvent::Withdrawn {
             trader,
             amount,
             free_balance: snapshot.free,
+        })
+        .expect("event emission should succeed");
+        Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub async fn settle_position(
+        &mut self,
+        trader: ActorId,
+        released_margin: u128,
+        payout: u128,
+        pool: Option<ActorId>,
+    ) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(released_margin)?;
+
+        let (snapshot, token_program, loss_to_pool) = {
+            let mut state = self.state.borrow_mut();
+            VaultService::require_market(&state)?;
+            let current_locked = state
+                .locked_balances
+                .get(&trader)
+                .copied()
+                .unwrap_or_default();
+            if current_locked < released_margin {
+                return Err(VaultError::InsufficientLockedBalance);
+            }
+            let next_locked = current_locked - released_margin;
+            let next_free = state
+                .free_balances
+                .get(&trader)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(payout);
+            state.locked_balances.insert(trader, next_locked);
+            state.free_balances.insert(trader, next_free);
+
+            (
+                AccountSnapshot {
+                    free: next_free,
+                    locked: next_locked,
+                },
+                state.token_program.ok_or(VaultError::MissingTokenProgram)?,
+                released_margin.saturating_sub(payout),
+            )
+        };
+
+        if loss_to_pool > 0 {
+            let pool = pool.ok_or(VaultError::Unauthorized)?;
+            let token = DemoUsdcVftClientProgram::client(token_program);
+            let mut token = token.token();
+            let transferred = token
+                .transfer(pool, loss_to_pool)
+                .await
+                .map_err(|_| VaultError::TokenTransferFailed)?;
+            if !transferred {
+                return Err(VaultError::TokenTransferFailed);
+            }
+        }
+
+        self.emit_event(VaultEvent::PositionSettled {
+            market: msg::source(),
+            trader,
+            released_margin,
+            payout,
+            account: snapshot,
         })
         .expect("event emission should succeed");
         Ok(snapshot)
@@ -314,29 +431,46 @@ impl VaultService<'_> {
     }
 
     #[export(unwrap_result)]
-    pub fn slash_for_liquidation(
+    pub async fn slash_for_liquidation(
         &mut self,
         trader: ActorId,
         amount: u128,
+        pool: Option<ActorId>,
     ) -> Result<AccountSnapshot, VaultError> {
         VaultService::require_positive(amount)?;
 
-        let mut state = self.state.borrow_mut();
-        VaultService::require_market(&state)?;
+        let (snapshot, token_program) = {
+            let mut state = self.state.borrow_mut();
+            VaultService::require_market(&state)?;
 
-        let free_balance = state.free_balances.get(&trader).copied().unwrap_or_default();
-        let locked_balance = {
-            let locked = state.locked_balances.entry(trader).or_default();
-            if *locked < amount {
-                return Err(VaultError::InsufficientLockedBalance);
-            }
-            *locked -= amount;
-            *locked
+            let free_balance = state.free_balances.get(&trader).copied().unwrap_or_default();
+            let locked_balance = {
+                let locked = state.locked_balances.entry(trader).or_default();
+                if *locked < amount {
+                    return Err(VaultError::InsufficientLockedBalance);
+                }
+                *locked -= amount;
+                *locked
+            };
+            (
+                AccountSnapshot {
+                    free: free_balance,
+                    locked: locked_balance,
+                },
+                state.token_program.ok_or(VaultError::MissingTokenProgram)?,
+            )
         };
-        let snapshot = AccountSnapshot {
-            free: free_balance,
-            locked: locked_balance,
-        };
+
+        let pool = pool.ok_or(VaultError::Unauthorized)?;
+        let token = DemoUsdcVftClientProgram::client(token_program);
+        let mut token = token.token();
+        let transferred = token
+            .transfer(pool, amount)
+            .await
+            .map_err(|_| VaultError::TokenTransferFailed)?;
+        if !transferred {
+            return Err(VaultError::TokenTransferFailed);
+        }
 
         self.emit_event(VaultEvent::MarginSlashed {
             market: msg::source(),
@@ -373,11 +507,16 @@ pub struct Program {
 
 #[sails_rs::program]
 impl Program {
-    pub fn create(owner: ActorId, session_registry: Option<ActorId>) -> Self {
+    pub fn create(
+        owner: ActorId,
+        session_registry: Option<ActorId>,
+        token_program: Option<ActorId>,
+    ) -> Self {
         Self {
             state: RefCell::new(VaultState {
                 owner,
                 session_registry,
+                token_program,
                 ..Default::default()
             }),
         }
