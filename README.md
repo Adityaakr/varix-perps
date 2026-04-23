@@ -1,12 +1,13 @@
 # Varix
 
-<img width="1493" height="893" alt="Screenshot 2026-04-22 at 8 20 35 PM" src="https://github.com/user-attachments/assets/7d02a41a-4a29-4aca-a67d-1141e3d9bab0" />
+<img width="1511" height="917" alt="Screenshot 2026-04-23 at 7 32 23 PM" src="https://github.com/user-attachments/assets/36f0ffc7-8832-4d68-adf2-15773dc41787" />
+
 
 **Varix** is a perpetual futures protocol and trading terminal designed for **Vara Network**.
 
-<img width="1489" height="946" alt="Screenshot 2026-04-22 at 8 18 43 PM" src="https://github.com/user-attachments/assets/48a81f47-9bd6-4cae-870e-904dbe94eddc" />
+<img width="1510" height="912" alt="Screenshot 2026-04-23 at 7 33 16 PM" src="https://github.com/user-attachments/assets/190f60af-3c9d-47ab-b7dc-356c4aa2ead6" />
 
-<img width="1375" height="507" alt="Screenshot 2026-04-22 at 8 19 17 PM" src="https://github.com/user-attachments/assets/4c75f8b4-678f-47eb-901f-62e661514051" />
+<img width="1510" height="938" alt="Screenshot 2026-04-23 at 7 33 57 PM" src="https://github.com/user-attachments/assets/a8b2c69d-94a5-4923-9d4c-fcf56122c55b" />
 
 The product direction is simple:
 
