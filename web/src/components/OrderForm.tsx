@@ -2,8 +2,6 @@ import { useState } from "react";
 import type { MarketSnapshot, PositionSnapshot } from "../types";
 import { formatMoney } from "../lib/format";
 
-const MAX_LEVERAGE = 50;
-
 type OrderFormProps = {
   asset: MarketSnapshot["asset"];
   availableCollateral: number;
@@ -55,8 +53,8 @@ export function OrderForm({
       setValidationError("Enter an order value of at least 100 USDC.");
       return;
     }
-    if (!Number.isFinite(leverage) || leverage < 1 || leverage > MAX_LEVERAGE) {
-      setValidationError(`Choose leverage between 1x and ${MAX_LEVERAGE}x.`);
+    if (!Number.isFinite(leverage) || leverage < 1 || leverage > 20) {
+      setValidationError("Choose leverage between 1x and 20x.");
       return;
     }
     if (availableCollateral <= 0) {
@@ -137,7 +135,7 @@ export function OrderForm({
       </label>
       <label className="field">
         <span>Leverage</span>
-        <input max={MAX_LEVERAGE} min={1} onChange={(event) => setLeverage(Number(event.target.value))} type="range" value={leverage} />
+        <input max={20} min={1} onChange={(event) => setLeverage(Number(event.target.value))} type="range" value={leverage} />
         <strong className="range-value">{leverage}x</strong>
       </label>
       <div className="trade-checkboxes">

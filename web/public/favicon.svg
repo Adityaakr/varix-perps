@@ -1,16 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="ember" x1="8" x2="52" y1="9" y2="56" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fe5a00" />
-      <stop offset="1" stop-color="#fe5a00" />
-    </linearGradient>
-    <linearGradient id="cream" x1="31" x2="59" y1="9" y2="55" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fff1dd" />
-      <stop offset="1" stop-color="#e7cdbb" />
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="12" fill="#050403" />
-  <path d="M8 13h19l17 38H26L8 13Z" fill="url(#ember)" />
-  <path d="M43 13h17L48 31l13 20H43L31 33l12-20Z" fill="url(#cream)" />
-  <path d="M34 34 43 24l3 14-10 11-2-15Z" fill="#130b06" opacity="0.58" />
+  <rect width="64" height="64" rx="14" fill="#0d0b17" />
+  <path d="M24 14h8l8 14 8-14h8L44 36v14h-8V36L24 14Z" fill="url(#g)" />
 </svg>
