@@ -152,7 +152,7 @@ async function main() {
   const risk = {
     initial_margin_bps: 1000,
     maintenance_margin_bps: 600,
-    max_leverage: 50,
+    max_leverage: 20,
     funding_interval_blocks: 20,
     liquidation_delay_blocks: 5,
     max_funding_velocity_bps: 75

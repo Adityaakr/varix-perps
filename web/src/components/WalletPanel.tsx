@@ -1,21 +1,23 @@
 type WalletPanelProps = {
-  actionPending: boolean;
   accountLabel: string | null;
   connectLabel: string;
   disabledReason: string | null;
   onClearSession?: (() => void) | null;
   onConnect: () => void;
+  onDisconnect?: (() => void) | null;
+  onFundGas?: (() => void) | null;
   ready: boolean;
   sessionLabel?: string | null;
 };
 
 export function WalletPanel({
-  actionPending,
   accountLabel,
   connectLabel,
   disabledReason,
   onClearSession,
   onConnect,
+  onDisconnect,
+  onFundGas,
   ready,
   sessionLabel
 }: WalletPanelProps) {
@@ -39,9 +41,19 @@ export function WalletPanel({
           <dd>{sessionLabel ?? "Not registered"}</dd>
         </div>
       </dl>
-      <button className="secondary-button wallet-action" disabled={!ready || actionPending} onClick={onConnect} type="button">
-        {actionPending ? "Transaction Pending" : connectLabel}
+      <button className="secondary-button wallet-action" disabled={!ready} onClick={onConnect} type="button">
+        {connectLabel}
       </button>
+      {onDisconnect ? (
+        <button className="secondary-button wide-secondary" onClick={onDisconnect} type="button">
+          Disconnect Wallet
+        </button>
+      ) : null}
+      {onFundGas ? (
+        <button className="secondary-button wide-secondary" onClick={onFundGas} type="button">
+          Fund Gas
+        </button>
+      ) : null}
       {onClearSession ? (
         <button className="secondary-button wide-secondary" onClick={onClearSession} type="button">
           Revoke Session

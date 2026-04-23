@@ -19,7 +19,6 @@ export type PositionSnapshot = {
   size: string;
   notional: string;
   entryPrice: string;
-  markPrice: string;
   margin: string;
   leverage: number;
   liquidationPrice: string;
