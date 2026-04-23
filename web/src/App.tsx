@@ -27,17 +27,21 @@ export default function App() {
   const orderBook = useOrderBook(asset);
   const recentTrades = useRecentTrades(asset);
   const livePrice = useMemo(() => {
-    const lastCandle = candles.at(-1);
-    if (lastCandle) {
-      return lastCandle.c;
-    }
     const topBid = orderBook.bids[0]?.price;
     const topAsk = orderBook.asks[0]?.price;
     if (topBid && topAsk) {
       return (topBid + topAsk) / 2;
     }
+    const latestTrade = recentTrades[0]?.price;
+    if (latestTrade) {
+      return latestTrade;
+    }
+    const lastCandle = candles.at(-1);
+    if (lastCandle) {
+      return lastCandle.c;
+    }
     return null;
-  }, [candles, orderBook.asks, orderBook.bids]);
+  }, [candles, orderBook.asks, orderBook.bids, recentTrades]);
   const varaProgram = useVaraProgram(asset, "vara", null, livePrice);
   const market = varaProgram.onchainMarket ?? marketDataSnapshot.market;
   const displayMarket = useMemo(() => {
@@ -129,6 +133,7 @@ export default function App() {
     : wallet.connectLabel;
   const navWalletDisabled =
     !programsOk ||
+    varaProgram.actionPending ||
     (!wallet.isConnected && !wallet.isReady) ||
     (wallet.isConnected && !varaProgram.isApiReady);
   const navWalletTitle = sharedDisabledReason;
@@ -165,6 +170,13 @@ export default function App() {
         walletCtaLabel={navWalletLabel}
         walletCtaTitle={navWalletTitle}
         onDisconnect={wallet.disconnect}
+        onFundGas={
+          wallet.isConnected
+            ? () => {
+                void varaProgram.fundWalletGas().catch(() => undefined);
+              }
+            : null
+        }
         onScrollToAccount={() => {
           document
             .getElementById("varix-account")
@@ -234,6 +246,7 @@ export default function App() {
                 : wallet.connectLabel
             }
             disabledReason={sharedDisabledReason}
+            actionPending={varaProgram.actionPending}
             onClearSession={
               varaProgram.onchainSession
                 ? () => {
@@ -248,10 +261,6 @@ export default function App() {
               }
               void varaProgram.createSession().catch(() => undefined);
             }}
-            onDisconnect={wallet.isConnected ? wallet.disconnect : null}
-            onFundGas={wallet.isConnected ? () => {
-              void varaProgram.fundWalletGas().catch(() => undefined);
-            } : null}
             ready={programsOk && (wallet.isConnected ? varaProgram.isApiReady : wallet.isReady)}
             sessionLabel={varaSessionLabel}
           />

@@ -1,5 +1,5 @@
 import { useAccount, useAlert, useApi, useSails } from "@gear-js/react-hooks";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import demoUsdcIdl from "../idl/demo-usdc-vft.idl?raw";
 import liquidityPoolIdl from "../idl/liquidity-pool.idl?raw";
 import marginVaultIdl from "../idl/margin-vault.idl?raw";
@@ -144,6 +144,7 @@ function parsePosition(asset: Asset, trader: string, market: VaraMarketSnapshot,
     size: formatUnits(size, 8),
     notional: formatUnits((size * mark) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE, 6),
     entryPrice: formatUnits(entry, 8),
+    markPrice: formatUnits(mark, 8),
     margin: formatUnits(margin, 6),
     leverage: Number(position.leverage),
     liquidationPrice: formatUnits(liquidationPrice, 8),
@@ -271,6 +272,8 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
   const [onchainPool, setOnchainPool] = useState<{ totalLiquidity: string; maxOpenNotional: string; reservedNotional: string } | null>(null);
   const [localSessionSigner, setLocalSessionSigner] = useState<LocalSessionSigner | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [actionPending, setActionPending] = useState(false);
+  const actionPendingRef = useRef(false);
 
   const walletAddress = account?.decodedAddress ?? ZERO_ACTOR;
   const isVaraReady = mode === "vara" && Boolean(
@@ -424,6 +427,12 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
 
   const runAction = useCallback(
     async <T>(title: string, pendingMessage: string, successMessage: string, execute: () => Promise<T>, refreshOnSuccess = true) => {
+      if (actionPendingRef.current) {
+        throw new Error("Another Vara transaction is already pending. Wait for it to finish before submitting again.");
+      }
+
+      actionPendingRef.current = true;
+      setActionPending(true);
       const alertId = alert.loading(pendingMessage, { title, timeout: 0 });
       try {
         const result = await execute();
@@ -443,6 +452,9 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           type: "error"
         });
         throw error;
+      } finally {
+        actionPendingRef.current = false;
+        setActionPending(false);
       }
     },
     [alert, refresh]
@@ -466,6 +478,7 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
       onchainPool,
       localSessionSigner,
       hasSessionSigner,
+      actionPending,
       syncMarketPrice,
       async fundWalletGas() {
         return runAction("Gas", "Funding wallet gas...", "Wallet funded with local VARA gas.", async () => {
@@ -814,6 +827,6 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
         });
       }
     }),
-    [account, api, asset, hasSessionSigner, isApiReady, isVaraReady, liveReferencePrice, localSessionSigner, marketSails.data, mode, onchainAccount, onchainMarket, onchainPool, onchainPosition, onchainSession, poolSails.data, runAction, sessionRegistrySails.data, sessionToken, syncMarketPrice, tokenSails.data, vaultSails.data]
+    [account, actionPending, api, asset, hasSessionSigner, isApiReady, isVaraReady, liveReferencePrice, localSessionSigner, marketSails.data, mode, onchainAccount, onchainMarket, onchainPool, onchainPosition, onchainSession, poolSails.data, runAction, sessionRegistrySails.data, sessionToken, syncMarketPrice, tokenSails.data, vaultSails.data]
   );
 }

@@ -51,7 +51,7 @@ const openOrderSchema = sessionActionSchema.extend({
   asset: assetSchema,
   side: sideSchema,
   notional: z.coerce.number().positive(),
-  leverage: z.coerce.number().int().min(1).max(20),
+  leverage: z.coerce.number().int().min(1).max(50),
   maxSlippageBps: z.coerce.number().int().min(0).max(500)
 });
 
@@ -141,6 +141,7 @@ type PositionSnapshot = {
   size: string;
   notional: string;
   entryPrice: string;
+  markPrice: string;
   margin: string;
   leverage: number;
   liquidationPrice: string;
@@ -611,6 +612,7 @@ class Engine {
       size: formatBase(position.quantityBase),
       notional: formatCollateral(notional),
       entryPrice: formatPrice(position.entryPrice),
+      markPrice: formatPrice(market.markPrice),
       margin: formatCollateral(position.margin),
       leverage: position.leverage,
       liquidationPrice: formatPrice(this.liquidationPrice(position)),
