@@ -1,3 +1,5 @@
+import { VarixLogo } from "./VarixLogo";
+
 type NavBarProps = {
   collateral: string;
   identity: string | null;
@@ -6,6 +8,7 @@ type NavBarProps = {
   walletCtaDisabled: boolean;
   walletCtaTitle?: string | null;
   onDisconnect: () => void;
+  onFundGas?: (() => void) | null;
   onWalletCta: () => void;
   onScrollToAccount: () => void;
 };
@@ -18,19 +21,17 @@ export function NavBar({
   walletCtaDisabled,
   walletCtaTitle,
   onDisconnect,
+  onFundGas,
   onWalletCta,
   onScrollToAccount
 }: NavBarProps) {
   return (
     <header className="nav">
       <div className="nav-brand">
-        <div className="brand-mark" aria-hidden="true">
-          <span />
-          <span />
-        </div>
+        <VarixLogo />
         <div className="brand-copy">
-          <strong>Varix</strong>
-          <span className="brand-subtitle">Perps on Vara</span>
+          <span className="brand-subtitle">Perpetual DEX</span>
+          <strong>Trade global markets on Vara</strong>
         </div>
       </div>
       <nav className="nav-links" aria-label="Primary">
@@ -51,9 +52,22 @@ export function NavBar({
           {walletCtaLabel}
         </button>
         {isConnected ? (
-          <button className="nav-disconnect" onClick={onDisconnect} type="button">
-            Disconnect
-          </button>
+          <details className="wallet-menu">
+            <summary aria-label="Wallet actions">
+              Wallet
+              <span aria-hidden="true" />
+            </summary>
+            <div className="wallet-menu__content">
+              {onFundGas ? (
+                <button onClick={onFundGas} type="button">
+                  Fund Gas
+                </button>
+              ) : null}
+              <button onClick={onDisconnect} type="button">
+                Disconnect Wallet
+              </button>
+            </div>
+          </details>
         ) : null}
         <button className="deposit-chip" onClick={onScrollToAccount} type="button">
           Deposit
