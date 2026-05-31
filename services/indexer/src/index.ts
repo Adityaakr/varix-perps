@@ -360,10 +360,6 @@ class Engine {
     const market = this.requireMarket(input.asset);
     const account = this.requireAccount(input.sessionToken);
     const positionKey = this.positionKey(session.trader, input.asset);
-
-    if (this.positions.has(positionKey)) {
-      throw new Error("position already exists for trader and asset");
-    }
     if (market.markPrice <= 0n || market.indexPrice <= 0n) {
       throw new Error("market has no live price");
     }
@@ -373,6 +369,118 @@ class Engine {
     if (margin <= 0n) {
       throw new Error("invalid margin");
     }
+
+    const quantityBase = notional * 10_000_000_000n / market.markPrice;
+    const slippageBps = Math.min(input.maxSlippageBps, 250);
+    const fillPrice =
+      input.side === "long"
+        ? market.markPrice * BigInt(BPS_DIVISOR + slippageBps) / BigInt(BPS_DIVISOR)
+        : market.markPrice * BigInt(BPS_DIVISOR - slippageBps) / BigInt(BPS_DIVISOR);
+
+    const existing = this.positions.get(positionKey);
+    if (existing) {
+      const existingSign = existing.side === "long" ? 1 : -1;
+      const inputSign = input.side === "long" ? 1 : -1;
+
+      if (existingSign === inputSign) {
+        if (account.freeCollateral < margin) {
+          throw new Error("insufficient collateral");
+        }
+        if (this.liquidityPoolBalance <= 0n) {
+          throw new Error("liquidity pool is empty");
+        }
+        if (this.totalOpenNotional() + notional > this.maxOpenNotional()) {
+          throw new Error("notional exceeds available liquidity capacity");
+        }
+
+        const totalQuantity = existing.quantityBase + quantityBase;
+        const weightedEntry =
+          (existing.quantityBase * existing.entryPrice + quantityBase * fillPrice) / totalQuantity;
+
+        account.freeCollateral -= margin;
+        account.lockedCollateral += margin;
+        existing.quantityBase = totalQuantity;
+        existing.entryPrice = weightedEntry;
+        existing.margin += margin;
+        existing.leverage = Math.max(1, Number(collateralFromBaseAndPrice(totalQuantity, market.markPrice) / existing.margin));
+        existing.lastFundingRateBps = Number(
+          (BigInt(existing.lastFundingRateBps) * (totalQuantity - quantityBase)
+            + BigInt(market.cumulativeFundingRateBps) * quantityBase) / totalQuantity
+        );
+        this.refreshOpenInterest(input.asset);
+        return this.positionSnapshot(existing);
+      }
+
+      const oldQuantity = existing.quantityBase;
+      const closeQuantity = quantityBase < oldQuantity ? quantityBase : oldQuantity;
+      const leftoverQuantity = quantityBase > oldQuantity ? quantityBase - oldQuantity : 0n;
+      const oldNotional = collateralFromBaseAndPrice(oldQuantity, market.markPrice);
+      const releasedNotional = collateralFromBaseAndPrice(closeQuantity, market.markPrice);
+      const leftoverNotional = collateralFromBaseAndPrice(leftoverQuantity, market.markPrice);
+      const nextTotalOpenNotional = this.totalOpenNotional() - oldNotional + leftoverNotional;
+      if (leftoverQuantity > 0n && this.liquidityPoolBalance <= 0n) {
+        throw new Error("liquidity pool is empty");
+      }
+      if (nextTotalOpenNotional > this.maxOpenNotional()) {
+        throw new Error("notional exceeds available liquidity capacity");
+      }
+
+      const releasedMargin = existing.margin * closeQuantity / oldQuantity;
+      const signedCloseQuantity = existing.side === "long" ? closeQuantity : -closeQuantity;
+      const realizedPnl = signedCloseQuantity * (market.markPrice - existing.entryPrice) / 10_000_000_000n;
+      const settledFunding = this.fundingDelta(existing, market) * closeQuantity / oldQuantity;
+      const released = releasedMargin + realizedPnl - settledFunding;
+      const leftoverMargin = leftoverQuantity > 0n
+        ? leftoverNotional / BigInt(input.leverage)
+        : 0n;
+      const freeAfterReduction = account.freeCollateral + (released > 0n ? released : 0n);
+      if (freeAfterReduction < leftoverMargin) {
+        throw new Error("insufficient collateral");
+      }
+
+      this.liquidityPoolBalance -= realizedPnl - settledFunding;
+      account.lockedCollateral -= releasedMargin;
+      if (released >= 0n) {
+        account.freeCollateral += released;
+        account.realizedPnl += realizedPnl - settledFunding;
+      } else {
+        account.realizedPnl += realizedPnl - settledFunding;
+        this.insuranceFund += -released;
+      }
+
+      if (leftoverQuantity === 0n) {
+        if (closeQuantity === oldQuantity) {
+          const closedSnapshot = this.positionSnapshot(existing);
+          this.positions.delete(positionKey);
+          this.refreshOpenInterest(input.asset);
+          return { ...closedSnapshot, size: "0", notional: "0", margin: "0", pnl: "0" };
+        }
+
+        existing.quantityBase = oldQuantity - closeQuantity;
+        existing.margin -= releasedMargin;
+        existing.lastFundingRateBps = market.cumulativeFundingRateBps;
+        this.refreshOpenInterest(input.asset);
+        return this.positionSnapshot(existing);
+      }
+
+      account.freeCollateral -= leftoverMargin;
+      account.lockedCollateral += leftoverMargin;
+      const flipped: Position = {
+        trader: session.trader,
+        asset: input.asset,
+        side: input.side,
+        quantityBase: leftoverQuantity,
+        entryPrice: fillPrice,
+        margin: leftoverMargin,
+        leverage: input.leverage,
+        openedAt: Date.now(),
+        lastFundingRateBps: market.cumulativeFundingRateBps
+      };
+      this.positions.set(positionKey, flipped);
+      this.refreshOpenInterest(input.asset);
+      return this.positionSnapshot(flipped);
+    }
+
     if (account.freeCollateral < margin) {
       throw new Error("insufficient collateral");
     }
@@ -382,13 +490,6 @@ class Engine {
     if (this.totalOpenNotional() + notional > this.maxOpenNotional()) {
       throw new Error("notional exceeds available liquidity capacity");
     }
-
-    const quantityBase = notional * 10_000_000_000n / market.markPrice;
-    const slippageBps = Math.min(input.maxSlippageBps, 250);
-    const fillPrice =
-      input.side === "long"
-        ? market.markPrice * BigInt(BPS_DIVISOR + slippageBps) / BigInt(BPS_DIVISOR)
-        : market.markPrice * BigInt(BPS_DIVISOR - slippageBps) / BigInt(BPS_DIVISOR);
 
     const position: Position = {
       trader: session.trader,
