@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { OraclePriceSnapshot } from "../hooks/usePolymarketOraclePrice";
 import type { Asset, MarketSnapshot } from "../types";
 import { formatMoney } from "../lib/format";
 
@@ -32,17 +33,17 @@ const ASSET_LOGOS: Record<string, ReactNode> = {
   ),
   SOL: (
     <svg viewBox="0 0 32 32" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
-      <g fill="none" fillRule="evenodd">
-        <circle cx="16" cy="16" r="16" fill="#000" />
-        <g transform="translate(6 8)">
-          <linearGradient id="sol-a" x1="0%" y1="100%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#9945FF" />
-            <stop offset="50%" stopColor="#14F195" />
-            <stop offset="100%" stopColor="#00D1FF" />
-          </linearGradient>
-          <path fill="url(#sol-a)" d="M3.5 11.4l2.8-2.8c.2-.2.4-.3.7-.3h12.7c.4 0 .6.5.3.8l-2.8 2.8c-.2.2-.4.3-.7.3H3.8c-.4 0-.6-.5-.3-.8zm2.8-8.1c.2-.2.4-.3.7-.3h12.7c.4 0 .6.5.3.8L17.2 6.6c-.2.2-.4.3-.7.3H3.8c-.4 0-.6-.5-.3-.8l2.8-2.8zm10.5 5.4c-.2-.2-.4-.3-.7-.3H3.4c-.4 0-.6.5-.3.8l2.8 2.8c.2.2.4.3.7.3h12.7c.4 0 .6-.5.3-.8l-2.8-2.8z" />
-        </g>
-      </g>
+      <defs>
+        <linearGradient id="sol-a" x1="3.5" y1="28" x2="28.5" y2="4" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#9945FF" />
+          <stop offset="48%" stopColor="#14F195" />
+          <stop offset="100%" stopColor="#00D1FF" />
+        </linearGradient>
+      </defs>
+      <rect x="2" y="2" width="28" height="28" rx="14" fill="#07100f" />
+      <path fill="url(#sol-a)" d="M8.15 8.2c.21-.21.5-.33.8-.33h17.16c.51 0 .77.62.41.98l-3.31 3.32c-.22.21-.51.33-.81.33H5.24c-.51 0-.77-.62-.41-.98L8.15 8.2z" />
+      <path fill="url(#sol-a)" d="M23.21 14.35c-.22-.21-.51-.33-.81-.33H5.24c-.51 0-.77.62-.41.98l3.32 3.31c.21.22.5.34.8.34h17.16c.51 0 .77-.62.41-.98l-3.31-3.32z" />
+      <path fill="url(#sol-a)" d="M8.15 20.5c.21-.21.5-.33.8-.33h17.16c.51 0 .77.62.41.98l-3.31 3.32c-.22.21-.51.33-.81.33H5.24c-.51 0-.77-.62-.41-.98l3.32-3.32z" />
     </svg>
   ),
 };
@@ -59,35 +60,168 @@ type MarketSelectorProps = {
   activeAsset: Asset;
   assets: Asset[];
   markets: MarketSnapshot[];
+  oraclePrices: Partial<Record<Asset, OraclePriceSnapshot>>;
   onSelect: (asset: Asset) => void;
 };
 
-export function MarketSelector({ activeAsset, assets, markets, onSelect }: MarketSelectorProps) {
+function resolvePriceLabel(asset: Asset, markets: MarketSnapshot[], oraclePrices: Partial<Record<Asset, OraclePriceSnapshot>>) {
+  const market = markets.find((item) => item.asset === asset);
+  const price = market ? Number(market.markPrice) : oraclePrices[asset]?.price;
+  return price !== undefined && Number.isFinite(price) && price > 0 ? `$${formatMoney(price, 1)}` : "Loading";
+}
+
+function resolveMarketRow(asset: Asset, markets: MarketSnapshot[], oraclePrices: Partial<Record<Asset, OraclePriceSnapshot>>) {
+  const market = markets.find((item) => item.asset === asset);
+  const mark = market ? Number(market.markPrice) : oraclePrices[asset]?.price;
+  const oracle = oraclePrices[asset]?.price ?? (market ? Number(market.indexPrice) : undefined);
+  return {
+    asset,
+    markLabel: mark !== undefined && Number.isFinite(mark) && mark > 0 ? formatMoney(mark, mark >= 100 ? 1 : 4) : "Loading",
+    oracleLabel: oracle !== undefined && Number.isFinite(oracle) && oracle > 0 ? formatMoney(oracle, oracle >= 100 ? 1 : 4) : "Loading",
+    fundingLabel: market ? `${(market.fundingRateBps / 100).toFixed(4)}%` : "0.0000%",
+    openInterestLabel: market
+      ? `$${formatMoney(Number(market.openInterestLong) + Number(market.openInterestShort), 0)}`
+      : "$0"
+  };
+}
+
+export function MarketSelector({ activeAsset, assets, markets, oraclePrices, onSelect }: MarketSelectorProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<"strict" | "all">("strict");
+  const rootRef = useRef<HTMLElement | null>(null);
+  const activePriceLabel = resolvePriceLabel(activeAsset, markets, oraclePrices);
+  const filteredRows = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return assets
+      .filter((asset) => {
+        if (!normalizedQuery) {
+          return true;
+        }
+        return `${asset}-USDC`.toLowerCase().includes(normalizedQuery);
+      })
+      .map((asset) => resolveMarketRow(asset, markets, oraclePrices));
+  }, [assets, markets, oraclePrices, query]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
   return (
-    <section className="market-selector">
-      <div className="market-selector__lead">
+    <section className="market-selector" ref={rootRef}>
+      <button
+        className="market-selector__lead"
+        type="button"
+        aria-expanded={isOpen}
+        aria-haspopup="dialog"
+        onClick={() => setIsOpen((current) => !current)}
+      >
         <div className="market-selector__icon" aria-hidden="true"><AssetLogo asset={activeAsset} /></div>
         <div>
           <strong>{activeAsset}-USDC</strong>
           <span>Perpetual</span>
         </div>
+        <span className={`market-selector__chevron ${isOpen ? "is-open" : ""}`} aria-hidden="true" />
+      </button>
+      <div className="market-select-summary">
+        <span>Mark</span>
+        <strong aria-live="polite">{activePriceLabel}</strong>
       </div>
-      <div className="market-list">
-        {assets.map((asset) => {
-          const market = markets.find((item) => item.asset === asset);
-          return (
-            <button
-              key={asset}
-              className={`market-pill ${activeAsset === asset ? "is-active" : ""}`}
-              onClick={() => onSelect(asset)}
-              type="button"
-            >
-              <span>{asset}</span>
-              <strong>{market ? `$${formatMoney(market.markPrice, 1)}` : "Waiting..."}</strong>
-            </button>
-          );
-        })}
-      </div>
+
+      {isOpen ? (
+        <div className="market-menu" role="dialog" aria-label="Select market">
+          <div className="market-menu__top">
+            <label className="market-menu__search">
+              <span className="sr-only">Search markets</span>
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search"
+                type="search"
+              />
+            </label>
+            <div className="market-menu__scope" role="group" aria-label="Market filter strictness">
+              <button
+                className={scope === "strict" ? "is-active" : ""}
+                type="button"
+                onClick={() => setScope("strict")}
+              >
+                Strict
+              </button>
+              <button
+                className={scope === "all" ? "is-active" : ""}
+                type="button"
+                onClick={() => setScope("all")}
+              >
+                All
+              </button>
+            </div>
+          </div>
+
+          <div className="market-menu__tabs" aria-label="Market categories">
+            {["All", "Perps", "Spot", "Outcome", "Crypto", "Trending", "Pre-launch"].map((tab) => (
+              <button className={tab === "Perps" ? "is-active" : ""} key={tab} type="button">
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <div className="market-menu__table">
+            <div className="market-menu__head" role="row">
+              <span>Symbol</span>
+              <span>Last Price</span>
+              <span>Oracle</span>
+              <span>8h Funding</span>
+              <span>Open Interest</span>
+            </div>
+            {filteredRows.length > 0 ? filteredRows.map((row) => (
+              <button
+                className={`market-menu__row ${row.asset === activeAsset ? "is-active" : ""}`}
+                key={row.asset}
+                type="button"
+                onClick={() => {
+                  onSelect(row.asset);
+                  setIsOpen(false);
+                }}
+              >
+                <span className="market-menu__symbol">
+                  <AssetLogo asset={row.asset} />
+                  <strong>{row.asset}-USDC</strong>
+                  <em>10x</em>
+                </span>
+                <span>{row.markLabel}</span>
+                <span>{row.oracleLabel}</span>
+                <span>{row.fundingLabel}</span>
+                <span>{row.openInterestLabel}</span>
+              </button>
+            )) : (
+              <div className="market-menu__empty">No markets found.</div>
+            )}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
