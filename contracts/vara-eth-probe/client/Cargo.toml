@@ -1,0 +1,22 @@
+[package]
+name = "vara-eth-probe-client"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Generated Rust client for Vara.eth probe"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+ethexe = ["vara-eth-probe-app/ethexe", "sails-rs/ethexe"]
+
+[dependencies]
+sails-rs.workspace = true
+
+[build-dependencies]
+vara-eth-probe-app = { workspace = true, default-features = false }
+sails-rs = { workspace = true, features = ["build"] }

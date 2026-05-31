@@ -1,0 +1,18 @@
+[package]
+name = "vara-eth-probe-app"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Minimal Vara.eth validation probe logic"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+ethexe = ["sails-rs/ethexe"]
+
+[dependencies]
+sails-rs.workspace = true
