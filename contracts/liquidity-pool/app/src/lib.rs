@@ -5,6 +5,8 @@ use demo_usdc_vft_client::{
     DemoUsdcVftClient,
     DemoUsdcVftClientProgram,
 };
+#[cfg(feature = "ethexe")]
+use alloy_sol_types::{SolType, SolValue, private::SolTypeValue};
 use sails_rs::{
     cell::RefCell,
     client::Program as _,
@@ -42,42 +44,6 @@ pub enum PoolError {
     TokenTransferFailed,
     Unauthorized,
     ZeroAmount,
-}
-
-#[sails_rs::event]
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
-#[codec(crate = sails_rs::scale_codec)]
-#[scale_info(crate = sails_rs::scale_info)]
-pub enum PoolEvent {
-    LiquidityDeposited {
-        provider: ActorId,
-        amount: u128,
-        shares: u128,
-    },
-    LiquidityWithdrawn {
-        provider: ActorId,
-        amount: u128,
-        shares: u128,
-    },
-    CapacityReserved {
-        market: ActorId,
-        amount: u128,
-        reserved_notional: u128,
-    },
-    CapacityReleased {
-        market: ActorId,
-        amount: u128,
-        reserved_notional: u128,
-    },
-    ProfitPaidToVault {
-        market: ActorId,
-        vault: ActorId,
-        amount: u128,
-    },
-    MarketAuthorizationChanged {
-        market: ActorId,
-        enabled: bool,
-    },
 }
 
 pub struct LiquidityPoolState {
@@ -143,7 +109,7 @@ impl<'a> PoolService<'a> {
     }
 }
 
-#[sails_rs::service(events = PoolEvent)]
+#[sails_rs::service]
 impl PoolService<'_> {
     #[export(unwrap_result)]
     pub async fn deposit_liquidity(&mut self, amount: u128) -> Result<LpAccount, PoolError> {
@@ -175,12 +141,6 @@ impl PoolService<'_> {
         account.shares = account.shares.saturating_add(shares);
         account.deposited = account.deposited.saturating_add(amount);
         let snapshot = *account;
-        self.emit_event(PoolEvent::LiquidityDeposited {
-            provider,
-            amount,
-            shares,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -229,12 +189,6 @@ impl PoolService<'_> {
             return Err(PoolError::TokenTransferFailed);
         }
 
-        self.emit_event(PoolEvent::LiquidityWithdrawn {
-            provider,
-            amount,
-            shares,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -245,11 +199,6 @@ impl PoolService<'_> {
         if state.authorized_markets.insert(market, true).is_some() {
             return Err(PoolError::MarketAlreadyAuthorized);
         }
-        self.emit_event(PoolEvent::MarketAuthorizationChanged {
-            market,
-            enabled: true,
-        })
-        .expect("event emission should succeed");
         Ok(())
     }
 
@@ -260,11 +209,6 @@ impl PoolService<'_> {
         if state.authorized_markets.remove(&market).is_none() {
             return Err(PoolError::MarketNotAuthorized);
         }
-        self.emit_event(PoolEvent::MarketAuthorizationChanged {
-            market,
-            enabled: false,
-        })
-        .expect("event emission should succeed");
         Ok(())
     }
 
@@ -285,12 +229,6 @@ impl PoolService<'_> {
             reserved_notional: state.reserved_notional,
             max_capacity,
         };
-        self.emit_event(PoolEvent::CapacityReserved {
-            market: msg::source(),
-            amount,
-            reserved_notional: state.reserved_notional,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -306,12 +244,6 @@ impl PoolService<'_> {
             reserved_notional: state.reserved_notional,
             max_capacity: PoolService::max_capacity(&state),
         };
-        self.emit_event(PoolEvent::CapacityReleased {
-            market: msg::source(),
-            amount,
-            reserved_notional: state.reserved_notional,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -345,12 +277,6 @@ impl PoolService<'_> {
             reserved_notional: state.reserved_notional,
             max_capacity: PoolService::max_capacity(&state),
         };
-        self.emit_event(PoolEvent::ProfitPaidToVault {
-            market: msg::source(),
-            vault,
-            amount,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -402,5 +328,110 @@ impl Program {
 
     pub fn pool(&self) -> PoolService<'_> {
         PoolService::new(&self.state)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+alloy_sol_types::sol! {
+    struct LpAccountSol {
+        uint128 shares;
+        uint128 deposited;
+    }
+
+    struct PoolStateSol {
+        uint128 total_liquidity;
+        uint128 total_shares;
+        uint128 reserved_notional;
+        uint128 max_capacity;
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<LpAccountSol> for LpAccount {
+    fn from(value: LpAccountSol) -> Self {
+        Self {
+            shares: value.shares,
+            deposited: value.deposited,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<LpAccount> for LpAccountSol {
+    fn from(value: LpAccount) -> Self {
+        Self {
+            shares: value.shares,
+            deposited: value.deposited,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for LpAccount {
+    type SolType = LpAccountSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<LpAccountSol> for LpAccount {
+    fn stv_to_tokens(&self) -> <LpAccountSol as SolType>::Token<'_> {
+        let value: LpAccountSol = (*self).into();
+        <LpAccountSol as SolTypeValue<LpAccountSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: LpAccountSol = (*self).into();
+        <LpAccountSol as SolTypeValue<LpAccountSol>>::stv_abi_encode_packed_to(&value, out);
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: LpAccountSol = (*self).into();
+        <LpAccountSol as SolTypeValue<LpAccountSol>>::stv_eip712_data_word(&value)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<PoolStateSol> for PoolState {
+    fn from(value: PoolStateSol) -> Self {
+        Self {
+            total_liquidity: value.total_liquidity,
+            total_shares: value.total_shares,
+            reserved_notional: value.reserved_notional,
+            max_capacity: value.max_capacity,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<PoolState> for PoolStateSol {
+    fn from(value: PoolState) -> Self {
+        Self {
+            total_liquidity: value.total_liquidity,
+            total_shares: value.total_shares,
+            reserved_notional: value.reserved_notional,
+            max_capacity: value.max_capacity,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for PoolState {
+    type SolType = PoolStateSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<PoolStateSol> for PoolState {
+    fn stv_to_tokens(&self) -> <PoolStateSol as SolType>::Token<'_> {
+        let value: PoolStateSol = (*self).into();
+        <PoolStateSol as SolTypeValue<PoolStateSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: PoolStateSol = (*self).into();
+        <PoolStateSol as SolTypeValue<PoolStateSol>>::stv_abi_encode_packed_to(&value, out);
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: PoolStateSol = (*self).into();
+        <PoolStateSol as SolTypeValue<PoolStateSol>>::stv_eip712_data_word(&value)
     }
 }

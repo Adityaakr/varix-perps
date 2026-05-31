@@ -151,57 +151,6 @@ pub mod pool {
         sails_rs::io_struct_impl!(Account (provider: ActorId) -> super::LpAccount);
         sails_rs::io_struct_impl!(PoolState () -> super::PoolState);
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub mod events {
-        use super::*;
-        #[derive(PartialEq, Debug, Encode, Decode)]
-        #[codec(crate = sails_rs::scale_codec)]
-        pub enum PoolEvents {
-            LiquidityDeposited {
-                provider: ActorId,
-                amount: u128,
-                shares: u128,
-            },
-            LiquidityWithdrawn {
-                provider: ActorId,
-                amount: u128,
-                shares: u128,
-            },
-            CapacityReserved {
-                market: ActorId,
-                amount: u128,
-                reserved_notional: u128,
-            },
-            CapacityReleased {
-                market: ActorId,
-                amount: u128,
-                reserved_notional: u128,
-            },
-            ProfitPaidToVault {
-                market: ActorId,
-                vault: ActorId,
-                amount: u128,
-            },
-            MarketAuthorizationChanged {
-                market: ActorId,
-                enabled: bool,
-            },
-        }
-        impl sails_rs::client::Event for PoolEvents {
-            const EVENT_NAMES: &'static [Route] = &[
-                "LiquidityDeposited",
-                "LiquidityWithdrawn",
-                "CapacityReserved",
-                "CapacityReleased",
-                "ProfitPaidToVault",
-                "MarketAuthorizationChanged",
-            ];
-        }
-        impl sails_rs::client::ServiceWithEvents for PoolImpl {
-            type Event = PoolEvents;
-        }
-    }
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]

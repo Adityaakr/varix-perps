@@ -20,7 +20,7 @@ async fn pool_accepts_liquidity_and_reserves_capacity() {
     let owner_env = GtestEnv::new(system, OWNER.into());
     let token = owner_env
         .deploy::<DemoUsdcVftClientProgram>(token_code_id, b"token".to_vec())
-        .create(OWNER.into(), "Demo USDC".into(), "dUSDC".into(), 6)
+        .create(OWNER.into())
         .await
         .unwrap();
     let pool = owner_env

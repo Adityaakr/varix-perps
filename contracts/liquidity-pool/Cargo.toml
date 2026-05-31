@@ -10,6 +10,10 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["liquidity-pool-app/ethexe", "sails-rs/ethexe"]
+
 [dependencies]
 liquidity-pool-app.workspace = true
 sails-rs.workspace = true
@@ -43,7 +47,7 @@ categories = ["cryptography::cryptocurrencies", "no-std", "wasm"]
 [workspace.dependencies]
 demo-usdc-vft = { version = "0.1.0", path = "../demo-usdc-vft" }
 demo-usdc-vft-client = { version = "0.1.0", path = "../demo-usdc-vft/client" }
-liquidity-pool-app = { version = "0.1.0", path = "app" }
+liquidity-pool-app = { version = "0.1.0", path = "app", default-features = false }
 liquidity-pool-client = { version = "0.1.0", path = "client" }
 sails-rs = "0.10.3"
 tokio = "1.48.0"

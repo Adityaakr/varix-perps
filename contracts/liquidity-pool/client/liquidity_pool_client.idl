@@ -24,37 +24,5 @@ service Pool {
   WithdrawLiquidity : (shares: u128) -> LpAccount;
   query Account : (provider: actor_id) -> LpAccount;
   query PoolState : () -> PoolState;
-
-  events {
-    LiquidityDeposited: struct {
-      provider: actor_id,
-      amount: u128,
-      shares: u128,
-    };
-    LiquidityWithdrawn: struct {
-      provider: actor_id,
-      amount: u128,
-      shares: u128,
-    };
-    CapacityReserved: struct {
-      market: actor_id,
-      amount: u128,
-      reserved_notional: u128,
-    };
-    CapacityReleased: struct {
-      market: actor_id,
-      amount: u128,
-      reserved_notional: u128,
-    };
-    ProfitPaidToVault: struct {
-      market: actor_id,
-      vault: actor_id,
-      amount: u128,
-    };
-    MarketAuthorizationChanged: struct {
-      market: actor_id,
-      enabled: bool,
-    };
-  }
 };
 

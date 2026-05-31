@@ -10,6 +10,11 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["dep:alloy-sol-types", "sails-rs/ethexe"]
+
 [dependencies]
+alloy-sol-types = { version = "1.5.7", default-features = false, optional = true }
 demo-usdc-vft-client.workspace = true
 sails-rs.workspace = true
