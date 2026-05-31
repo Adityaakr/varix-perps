@@ -1,5 +1,7 @@
 export type Asset = "BTC" | "ETH" | "SOL";
 export type RuntimeMode = "demo" | "vara";
+export type TradeMode = "vara" | "vara-eth";
+export type VaraEthExecutionMode = "injected" | "classic";
 
 export type MarketSnapshot = {
   asset: Asset;
@@ -13,6 +15,7 @@ export type MarketSnapshot = {
 };
 
 export type PositionSnapshot = {
+  id: number;
   trader: string;
   asset: Asset;
   side: "long" | "short";
@@ -122,6 +125,12 @@ export type VaraPositionSnapshot = {
   opened_at: bigint;
 };
 
+export type VaraOpenPositionSnapshot = {
+  id: bigint;
+  trader: string;
+  position: VaraPositionSnapshot;
+};
+
 export type VaraMarketSnapshot = {
   mark_price: bigint;
   index_price: bigint;
@@ -149,4 +158,18 @@ export type LocalSessionSigner = {
   actorId: string;
   address: string;
   createdAt: number;
+};
+
+export type VaraSponsoredVoucher = {
+  voucherId: string;
+  spender: string;
+  programs: string[];
+  source: "fresh" | "cached";
+  valueVara: string;
+  durationBlocks: number;
+};
+
+export type VaraSponsoredVoucherBundle = {
+  owner: VaraSponsoredVoucher | null;
+  session: VaraSponsoredVoucher | null;
 };
