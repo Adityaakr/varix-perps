@@ -10,9 +10,13 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["perp-market-app/ethexe", "sails-rs/ethexe"]
+
 [dependencies]
 sails-rs.workspace = true
 
 [build-dependencies]
-perp-market-app.workspace = true
+perp-market-app = { workspace = true, default-features = false }
 sails-rs = { workspace = true, features = ["build"] }

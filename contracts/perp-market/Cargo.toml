@@ -10,6 +10,11 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["sessions"]
+ethexe = ["perp-market-app/ethexe", "sails-rs/ethexe"]
+sessions = ["perp-market-app/sessions"]
+
 [dependencies]
 perp-market-app.workspace = true
 sails-rs.workspace = true
@@ -54,7 +59,7 @@ liquidity-pool = { version = "0.1.0", path = "../liquidity-pool" }
 liquidity-pool-client = { version = "0.1.0", path = "../liquidity-pool/client" }
 margin-vault = { version = "0.1.0", path = "../margin-vault" }
 margin-vault-client = { version = "0.1.0", path = "../margin-vault/client" }
-perp-market-app = { version = "0.1.0", path = "app" }
+perp-market-app = { version = "0.1.0", path = "app", default-features = false }
 perp-market-client = { version = "0.1.0", path = "client" }
 sails-rs = "0.10.3"
 session-registry = { version = "0.1.0", path = "../session-registry" }

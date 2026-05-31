@@ -2,6 +2,9 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+#[cfg(feature = "ethexe")]
+use alloy_sol_types::{SolType, SolValue, private::SolTypeValue};
 use liquidity_pool_client::{
     pool::Pool as PoolCalls,
     LiquidityPoolClient,
@@ -19,6 +22,7 @@ use sails_rs::{
     gstd::{exec, msg},
     prelude::*,
 };
+#[cfg(feature = "sessions")]
 use session_registry_client::{
     session_registry::SessionRegistry as SessionRegistryCalls,
     SessionAction as SessionRegistryAction,
@@ -44,6 +48,15 @@ pub struct ClosedPosition {
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
 #[scale_info(crate = sails_rs::scale_info)]
+pub struct OpenPosition {
+    pub id: u64,
+    pub trader: ActorId,
+    pub position: Position,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
 pub enum MarketError {
     ExternalIntegrationFailed,
     InternalOnly,
@@ -54,7 +67,8 @@ pub enum MarketError {
     MissingLiquidityPool,
     MissingMarginVault,
     NoPosition,
-    PositionAlreadyExists,
+    PositionIdOverflow,
+    PositionNotOwned,
     SessionRegistryQueryFailed,
     SizeTooLarge,
     Unauthorized,
@@ -66,63 +80,87 @@ pub enum MarketError {
 pub struct MarketConfig {
     pub owner: ActorId,
     pub asset: Asset,
-    pub oracle_service: Option<ActorId>,
-    pub margin_vault: Option<ActorId>,
-    pub liquidity_pool: Option<ActorId>,
-    pub session_registry: Option<ActorId>,
+    pub oracle_service: ActorId,
+    pub margin_vault: ActorId,
+    pub liquidity_pool: ActorId,
+    pub session_registry: ActorId,
     pub risk: MarketRiskConfig,
 }
 
-#[sails_rs::event]
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
 #[scale_info(crate = sails_rs::scale_info)]
-pub enum MarketEvent {
-    PriceUpdated {
-        mark_price: u128,
-        index_price: u128,
-    },
-    PositionOpened {
-        trader: ActorId,
-        position: Position,
-    },
-    PositionClosed {
-        trader: ActorId,
-        close: ClosedPosition,
-    },
-    MarginAdded {
-        trader: ActorId,
-        new_margin: u128,
-    },
-    FundingSettled {
-        funding_rate_bps: i128,
-        cumulative_funding_rate_bps: i128,
-        block: u32,
-    },
-    Liquidated {
-        trader: ActorId,
-        mark_price: u128,
-        equity: i128,
-        maintenance_margin: u128,
-    },
+pub struct PositionLookup {
+    pub found: bool,
+    pub position: OpenPosition,
 }
 
 pub struct PerpMarketState {
     config: MarketConfig,
     snapshot: MarketSnapshot,
     last_funding_block: u32,
-    positions: BTreeMap<ActorId, Position>,
+    next_position_id: u64,
+    positions: BTreeMap<u64, OpenPosition>,
+    trader_positions: BTreeMap<ActorId, Vec<u64>>,
 }
 
 pub struct MarketService<'a> {
     state: &'a RefCell<PerpMarketState>,
 }
 
-impl<'a> MarketService<'a> {
-    const SERVICE_NAME: &'static str = "MarketService";
-    const FUNDING_METHOD: &'static str = "SettleFunding";
-    const LIQUIDATION_METHOD: &'static str = "CheckLiquidation";
+enum TraderAction {
+    AddMargin,
+    Trade,
+}
 
+fn zero_actor_id() -> ActorId {
+    ActorId::from([0u8; 32])
+}
+
+fn optional_actor_id(actor: ActorId) -> Option<ActorId> {
+    if actor == zero_actor_id() {
+        None
+    } else {
+        Some(actor)
+    }
+}
+
+impl MarketConfig {
+    fn oracle_service(&self) -> Option<ActorId> {
+        optional_actor_id(self.oracle_service)
+    }
+
+    fn margin_vault(&self) -> Option<ActorId> {
+        optional_actor_id(self.margin_vault)
+    }
+
+    fn liquidity_pool(&self) -> Option<ActorId> {
+        optional_actor_id(self.liquidity_pool)
+    }
+
+    fn session_registry(&self) -> Option<ActorId> {
+        optional_actor_id(self.session_registry)
+    }
+}
+
+fn encode_asset(asset: Asset) -> u8 {
+    match asset {
+        Asset::Btc => 0,
+        Asset::Eth => 1,
+        Asset::Sol => 2,
+    }
+}
+
+fn decode_asset(value: u8) -> Asset {
+    match value {
+        0 => Asset::Btc,
+        1 => Asset::Eth,
+        2 => Asset::Sol,
+        _ => Asset::Btc,
+    }
+}
+
+impl<'a> MarketService<'a> {
     pub fn new(state: &'a RefCell<PerpMarketState>) -> Self {
         Self { state }
     }
@@ -136,30 +174,11 @@ impl<'a> MarketService<'a> {
     }
 
     fn require_internal_or_owner(state: &PerpMarketState) -> Result<(), MarketError> {
-        if msg::source() == exec::program_id() || msg::source() == state.config.owner {
+        if msg::source() == state.config.owner {
             Ok(())
         } else {
             Err(MarketError::Unauthorized)
         }
-    }
-
-    fn funding_payload() -> Vec<u8> {
-        [Self::SERVICE_NAME.encode(), Self::FUNDING_METHOD.encode()].concat()
-    }
-
-    fn liquidation_payload(trader: ActorId) -> Vec<u8> {
-        [
-            Self::SERVICE_NAME.encode(),
-            Self::LIQUIDATION_METHOD.encode(),
-            trader.encode(),
-        ]
-        .concat()
-    }
-
-    fn schedule_payload(payload: Vec<u8>, delay: u32) {
-        let gas = exec::gas_available().saturating_mul(9).saturating_div(10);
-        msg::send_bytes_with_gas_delayed(exec::program_id(), payload, gas, 0, delay)
-            .expect("delayed self message should schedule");
     }
 
     fn current_block() -> u32 {
@@ -274,14 +293,152 @@ impl<'a> MarketService<'a> {
         Ok(premium_bps.clamp(-(max_velocity_bps as i128), max_velocity_bps as i128))
     }
 
-    async fn resolve_trader(
-        &self,
-        action: SessionRegistryAction,
-    ) -> Result<ActorId, MarketError> {
+    fn next_position_id(state: &mut PerpMarketState) -> Result<u64, MarketError> {
+        let id = state.next_position_id;
+        state.next_position_id = state
+            .next_position_id
+            .checked_add(1)
+            .ok_or(MarketError::PositionIdOverflow)?;
+        Ok(id)
+    }
+
+    fn insert_position(
+        state: &mut PerpMarketState,
+        trader: ActorId,
+        position: Position,
+    ) -> Result<OpenPosition, MarketError> {
+        let position_id = Self::next_position_id(state)?;
+        let open_position = OpenPosition {
+            id: position_id,
+            trader,
+            position,
+        };
+        state.positions.insert(position_id, open_position.clone());
+        state
+            .trader_positions
+            .entry(trader)
+            .or_default()
+            .push(position_id);
+        Ok(open_position)
+    }
+
+    fn trader_position_ids(state: &PerpMarketState, trader: ActorId) -> Vec<u64> {
+        state
+            .trader_positions
+            .get(&trader)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn trader_net_position(state: &PerpMarketState, trader: ActorId) -> Option<OpenPosition> {
+        Self::trader_position_ids(state, trader)
+            .into_iter()
+            .find_map(|position_id| state.positions.get(&position_id).cloned())
+    }
+
+    fn weighted_entry_price(
+        existing: &Position,
+        added_size: u128,
+        fill_price: u128,
+    ) -> Result<u128, MarketError> {
+        let existing_size = existing.size.unsigned_abs();
+        let total_size = existing_size
+            .checked_add(added_size)
+            .ok_or(MarketError::InvalidSize)?;
+        let existing_value = existing_size
+            .checked_mul(existing.entry_price)
+            .ok_or(MarketError::InvalidPrice)?;
+        let added_value = added_size
+            .checked_mul(fill_price)
+            .ok_or(MarketError::InvalidPrice)?;
+        existing_value
+            .checked_add(added_value)
+            .ok_or(MarketError::InvalidPrice)?
+            .checked_div(total_size)
+            .ok_or(MarketError::InvalidPrice)
+    }
+
+    fn weighted_funding_rate(
+        existing: &Position,
+        added_size: u128,
+        current_rate: i128,
+    ) -> Result<i128, MarketError> {
+        let existing_size = existing.size.unsigned_abs();
+        let total_size = existing_size
+            .checked_add(added_size)
+            .ok_or(MarketError::InvalidSize)? as i128;
+        let existing_weighted = existing
+            .last_funding_rate_bps
+            .checked_mul(existing_size as i128)
+            .ok_or(MarketError::InvalidMargin)?;
+        let added_weighted = current_rate
+            .checked_mul(added_size as i128)
+            .ok_or(MarketError::InvalidMargin)?;
+        existing_weighted
+            .checked_add(added_weighted)
+            .ok_or(MarketError::InvalidMargin)?
+            .checked_div(total_size)
+            .ok_or(MarketError::InvalidMargin)
+    }
+
+    fn effective_leverage(
+        size: u128,
+        margin: u128,
+        mark_price: u128,
+        _fallback: u16,
+    ) -> Result<u16, MarketError> {
+        if margin == 0 {
+            return Err(MarketError::InvalidMargin);
+        }
+        let notional = notional_to_collateral(size, mark_price).ok_or(MarketError::InvalidSize)?;
+        let leverage = notional.checked_div(margin).unwrap_or(0).max(1);
+        Ok(leverage.min(u16::MAX as u128) as u16)
+    }
+
+    fn remove_position(state: &mut PerpMarketState, position_id: u64) -> Option<OpenPosition> {
+        let removed = state.positions.remove(&position_id)?;
+        let should_remove_index = if let Some(ids) = state.trader_positions.get_mut(&removed.trader)
+        {
+            if let Some(index) = ids.iter().position(|id| *id == position_id) {
+                ids.remove(index);
+            }
+            ids.is_empty()
+        } else {
+            false
+        };
+        if should_remove_index {
+            state.trader_positions.remove(&removed.trader);
+        }
+        Some(removed)
+    }
+
+    fn trader_position(
+        state: &PerpMarketState,
+        trader: ActorId,
+        position_id: u64,
+    ) -> Result<OpenPosition, MarketError> {
+        let position = state
+            .positions
+            .get(&position_id)
+            .cloned()
+            .ok_or(MarketError::NoPosition)?;
+        if position.trader != trader {
+            return Err(MarketError::PositionNotOwned);
+        }
+        Ok(position)
+    }
+
+    #[cfg(feature = "sessions")]
+    async fn resolve_trader(&self, action: TraderAction) -> Result<ActorId, MarketError> {
         let caller = msg::source();
-        let session_registry = self.state.borrow().config.session_registry;
+        let session_registry = self.state.borrow().config.session_registry();
         let Some(session_registry) = session_registry else {
             return Ok(caller);
+        };
+
+        let action = match action {
+            TraderAction::AddMargin => SessionRegistryAction::AddMargin,
+            TraderAction::Trade => SessionRegistryAction::Trade,
         };
 
         let session_registry = SessionRegistryClientProgram::client(session_registry);
@@ -305,7 +462,19 @@ impl<'a> MarketService<'a> {
         }
     }
 
-    async fn lock_in_vault(vault_id: ActorId, trader: ActorId, amount: u128) -> Result<(), MarketError> {
+    #[cfg(not(feature = "sessions"))]
+    async fn resolve_trader(&self, _action: TraderAction) -> Result<ActorId, MarketError> {
+        Ok(msg::source())
+    }
+
+    async fn lock_in_vault(
+        vault_id: ActorId,
+        trader: ActorId,
+        amount: u128,
+    ) -> Result<(), MarketError> {
+        if amount == 0 {
+            return Ok(());
+        }
         let vault = MarginVaultClientProgram::client(vault_id);
         let mut vault = vault.vault();
         vault.lock_margin(trader, amount)
@@ -315,6 +484,9 @@ impl<'a> MarketService<'a> {
     }
 
     async fn reserve_in_pool(pool_id: ActorId, amount: u128) -> Result<(), MarketError> {
+        if amount == 0 {
+            return Ok(());
+        }
         let pool = LiquidityPoolClientProgram::client(pool_id);
         let mut pool = pool.pool();
         pool.reserve_notional(amount)
@@ -324,11 +496,57 @@ impl<'a> MarketService<'a> {
     }
 
     async fn release_in_pool(pool_id: ActorId, amount: u128) -> Result<(), MarketError> {
+        if amount == 0 {
+            return Ok(());
+        }
         let pool = LiquidityPoolClientProgram::client(pool_id);
         let mut pool = pool.pool();
         pool.release_notional(amount)
             .await
             .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        Ok(())
+    }
+
+    async fn ensure_pool_capacity_after_release(
+        pool_id: ActorId,
+        released_notional: u128,
+        required_notional: u128,
+    ) -> Result<(), MarketError> {
+        if required_notional == 0 {
+            return Ok(());
+        }
+        let pool = LiquidityPoolClientProgram::client(pool_id);
+        let pool = pool.pool();
+        let state = pool
+            .pool_state()
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        let reserved_after_close = state.reserved_notional.saturating_sub(released_notional);
+        let available_after_close = state.max_capacity.saturating_sub(reserved_after_close);
+        if available_after_close < required_notional {
+            return Err(MarketError::SizeTooLarge);
+        }
+        Ok(())
+    }
+
+    async fn ensure_vault_margin_after_settlement(
+        vault_id: ActorId,
+        trader: ActorId,
+        close_payout: u128,
+        required_margin: u128,
+    ) -> Result<(), MarketError> {
+        if required_margin == 0 {
+            return Ok(());
+        }
+        let vault = MarginVaultClientProgram::client(vault_id);
+        let vault = vault.vault();
+        let account = vault
+            .account(trader)
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        if account.free.saturating_add(close_payout) < required_margin {
+            return Err(MarketError::InvalidMargin);
+        }
         Ok(())
     }
 
@@ -353,7 +571,7 @@ impl<'a> MarketService<'a> {
         trader: ActorId,
         released_margin: u128,
         payout: u128,
-        pool: Option<ActorId>,
+        pool: ActorId,
     ) -> Result<(), MarketError> {
         let vault = MarginVaultClientProgram::client(vault_id);
         let mut vault = vault.vault();
@@ -367,7 +585,7 @@ impl<'a> MarketService<'a> {
         vault_id: ActorId,
         trader: ActorId,
         amount: u128,
-        pool: Option<ActorId>,
+        pool: ActorId,
     ) -> Result<(), MarketError> {
         let vault = MarginVaultClientProgram::client(vault_id);
         let mut vault = vault.vault();
@@ -378,7 +596,7 @@ impl<'a> MarketService<'a> {
     }
 }
 
-#[sails_rs::service(events = MarketEvent)]
+#[sails_rs::service]
 impl MarketService<'_> {
     #[export(unwrap_result)]
     pub fn update_price(
@@ -393,11 +611,6 @@ impl MarketService<'_> {
         }
         state.snapshot.mark_price = mark_price;
         state.snapshot.index_price = index_price;
-        self.emit_event(MarketEvent::PriceUpdated {
-            mark_price,
-            index_price,
-        })
-        .expect("event emission should succeed");
         Ok(state.snapshot)
     }
 
@@ -406,12 +619,12 @@ impl MarketService<'_> {
         &mut self,
         side: Side,
         size: u128,
-        leverage: u8,
+        leverage: u16,
         margin: u128,
         _max_slippage_bps: u16,
-    ) -> Result<Position, MarketError> {
-        let trader = self.resolve_trader(SessionRegistryAction::Trade).await?;
-        let (mark_price, cumulative_funding_rate_bps, liquidity_pool, margin_vault, delay) = {
+    ) -> Result<OpenPosition, MarketError> {
+        let trader = self.resolve_trader(TraderAction::Trade).await?;
+        let (mark_price, cumulative_funding_rate_bps, liquidity_pool, margin_vault) = {
             let state = self.state.borrow();
             if size == 0 {
                 return Err(MarketError::InvalidSize);
@@ -422,106 +635,332 @@ impl MarketService<'_> {
             if state.snapshot.mark_price == 0 {
                 return Err(MarketError::InvalidPrice);
             }
-            if state.positions.contains_key(&trader) {
-                return Err(MarketError::PositionAlreadyExists);
-            }
             (
                 state.snapshot.mark_price,
                 state.snapshot.cumulative_funding_rate_bps,
-                state.config.liquidity_pool,
-                state.config.margin_vault,
-                state.config.risk.liquidation_delay_blocks,
+                state.config.liquidity_pool(),
+                state.config.margin_vault(),
             )
         };
 
         let notional = notional_to_collateral(size, mark_price).ok_or(MarketError::InvalidSize)?;
         let required_margin =
             collateral_for_leverage(notional, leverage).ok_or(MarketError::InvalidLeverage)?;
-        if margin < required_margin {
-            return Err(MarketError::InvalidMargin);
-        }
-
-        if let Some(pool_id) = liquidity_pool {
-            MarketService::reserve_in_pool(pool_id, notional).await?;
-        }
-        if let Some(vault_id) = margin_vault {
-            if let Err(error) = MarketService::lock_in_vault(vault_id, trader, margin).await {
-                if let Some(pool_id) = liquidity_pool {
-                    let _ = MarketService::release_in_pool(pool_id, notional).await;
-                }
-                return Err(error);
-            }
-        }
 
         let signed_size = side
             .direction()
             .checked_mul(size as i128)
             .ok_or(MarketError::InvalidSize)?;
-        let position = Position {
-            size: signed_size,
+
+        let existing = {
+            let state = self.state.borrow();
+            MarketService::trader_net_position(&state, trader)
+        };
+
+        let Some(existing) = existing else {
+            if margin < required_margin {
+                return Err(MarketError::InvalidMargin);
+            }
+            if let Some(pool_id) = liquidity_pool {
+                MarketService::reserve_in_pool(pool_id, notional).await?;
+            }
+            if let Some(vault_id) = margin_vault {
+                if let Err(error) = MarketService::lock_in_vault(vault_id, trader, margin).await {
+                    if let Some(pool_id) = liquidity_pool {
+                        let _ = MarketService::release_in_pool(pool_id, notional).await;
+                    }
+                    return Err(error);
+                }
+            }
+
+            let position = Position {
+                size: signed_size,
+                entry_price: mark_price,
+                margin,
+                leverage,
+                last_funding_rate_bps: cumulative_funding_rate_bps,
+                opened_at: MarketService::current_block() as u64,
+            };
+
+            let open_position = {
+                let mut state = self.state.borrow_mut();
+                if side == Side::Long {
+                    state.snapshot.open_interest_long =
+                        state.snapshot.open_interest_long.saturating_add(size);
+                } else {
+                    state.snapshot.open_interest_short =
+                        state.snapshot.open_interest_short.saturating_add(size);
+                }
+                MarketService::insert_position(&mut state, trader, position)?
+            };
+
+            return Ok(open_position);
+        };
+
+        if existing.position.size.signum() == signed_size.signum() {
+            if margin < required_margin {
+                return Err(MarketError::InvalidMargin);
+            }
+            if let Some(pool_id) = liquidity_pool {
+                MarketService::reserve_in_pool(pool_id, notional).await?;
+            }
+            if let Some(vault_id) = margin_vault {
+                if let Err(error) = MarketService::lock_in_vault(vault_id, trader, margin).await {
+                    if let Some(pool_id) = liquidity_pool {
+                        let _ = MarketService::release_in_pool(pool_id, notional).await;
+                    }
+                    return Err(error);
+                }
+            }
+
+            let updated_position = {
+                let mut state = self.state.borrow_mut();
+                let total_abs_size = existing
+                    .position
+                    .size
+                    .unsigned_abs()
+                    .checked_add(size)
+                    .ok_or(MarketError::InvalidSize)?;
+                let total_margin = existing
+                    .position
+                    .margin
+                    .checked_add(margin)
+                    .ok_or(MarketError::InvalidMargin)?;
+                let position = Position {
+                    size: existing
+                        .position
+                        .size
+                        .checked_add(signed_size)
+                        .ok_or(MarketError::InvalidSize)?,
+                    entry_price: MarketService::weighted_entry_price(
+                        &existing.position,
+                        size,
+                        mark_price,
+                    )?,
+                    margin: total_margin,
+                    leverage: MarketService::effective_leverage(
+                        total_abs_size,
+                        total_margin,
+                        mark_price,
+                        leverage,
+                    )?,
+                    last_funding_rate_bps: MarketService::weighted_funding_rate(
+                        &existing.position,
+                        size,
+                        cumulative_funding_rate_bps,
+                    )?,
+                    opened_at: existing.position.opened_at,
+                };
+                let open_position = OpenPosition {
+                    id: existing.id,
+                    trader,
+                    position,
+                };
+                if side == Side::Long {
+                    state.snapshot.open_interest_long =
+                        state.snapshot.open_interest_long.saturating_add(size);
+                } else {
+                    state.snapshot.open_interest_short =
+                        state.snapshot.open_interest_short.saturating_add(size);
+                }
+                state.positions.insert(existing.id, open_position.clone());
+                open_position
+            };
+
+            return Ok(updated_position);
+        }
+
+        let existing_abs_size = existing.position.size.unsigned_abs();
+        let close_size = size.min(existing_abs_size);
+        let leftover_size = size.saturating_sub(existing_abs_size);
+        let released_notional =
+            notional_to_collateral(close_size, mark_price).ok_or(MarketError::InvalidSize)?;
+        let (preview, close) = MarketService::preview_close(
+            &existing.position,
+            close_size,
+            mark_price,
+            cumulative_funding_rate_bps,
+        )?;
+        let leftover_notional = if leftover_size > 0 {
+            notional_to_collateral(leftover_size, mark_price).ok_or(MarketError::InvalidSize)?
+        } else {
+            0
+        };
+        let leftover_margin = if leftover_size > 0 {
+            collateral_for_leverage(leftover_notional, leverage)
+                .ok_or(MarketError::InvalidLeverage)?
+        } else {
+            0
+        };
+
+        if let Some(pool_id) = liquidity_pool {
+            MarketService::ensure_pool_capacity_after_release(
+                pool_id,
+                released_notional,
+                leftover_notional,
+            )
+            .await?;
+        }
+        if let Some(vault_id) = margin_vault {
+            MarketService::ensure_vault_margin_after_settlement(
+                vault_id,
+                trader,
+                close.payout,
+                leftover_margin,
+            )
+            .await?;
+        }
+
+        if let Some(pool_id) = liquidity_pool {
+            MarketService::release_in_pool(pool_id, released_notional).await?;
+        }
+        if close.payout > close.released_margin {
+            let pool_id = liquidity_pool.ok_or(MarketError::MissingLiquidityPool)?;
+            let vault_id = margin_vault.ok_or(MarketError::MissingMarginVault)?;
+            MarketService::pay_profit_to_vault(
+                pool_id,
+                vault_id,
+                close.payout.saturating_sub(close.released_margin),
+            )
+            .await?;
+        }
+        if let Some(vault_id) = margin_vault {
+            MarketService::settle_in_vault(
+                vault_id,
+                trader,
+                close.released_margin,
+                close.payout,
+                liquidity_pool.unwrap_or_else(zero_actor_id),
+            )
+            .await?;
+        }
+
+        if leftover_size > 0 {
+            if let Some(pool_id) = liquidity_pool {
+                MarketService::reserve_in_pool(pool_id, leftover_notional).await?;
+            }
+            if let Some(vault_id) = margin_vault {
+                if let Err(error) =
+                    MarketService::lock_in_vault(vault_id, trader, leftover_margin).await
+                {
+                    if let Some(pool_id) = liquidity_pool {
+                        let _ = MarketService::release_in_pool(pool_id, leftover_notional).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        let mut state = self.state.borrow_mut();
+        if existing.position.size > 0 {
+            state.snapshot.open_interest_long =
+                state.snapshot.open_interest_long.saturating_sub(close_size);
+        } else {
+            state.snapshot.open_interest_short =
+                state.snapshot.open_interest_short.saturating_sub(close_size);
+        }
+
+        if leftover_size == 0 {
+            if preview.size == 0 {
+                let _ = MarketService::remove_position(&mut state, existing.id);
+            } else {
+                state.positions.insert(
+                    existing.id,
+                    OpenPosition {
+                        id: existing.id,
+                        trader,
+                        position: preview.clone(),
+                    },
+                );
+            }
+            return Ok(OpenPosition {
+                id: existing.id,
+                trader,
+                position: preview,
+            });
+        }
+
+        let flipped_position = Position {
+            size: signed_size.signum() * leftover_size as i128,
             entry_price: mark_price,
-            margin,
+            margin: leftover_margin,
             leverage,
             last_funding_rate_bps: cumulative_funding_rate_bps,
             opened_at: MarketService::current_block() as u64,
         };
-
-        let mut state = self.state.borrow_mut();
+        let open_position = OpenPosition {
+            id: existing.id,
+            trader,
+            position: flipped_position,
+        };
         if side == Side::Long {
             state.snapshot.open_interest_long =
-                state.snapshot.open_interest_long.saturating_add(size);
+                state.snapshot.open_interest_long.saturating_add(leftover_size);
         } else {
             state.snapshot.open_interest_short =
-                state.snapshot.open_interest_short.saturating_add(size);
+                state.snapshot.open_interest_short.saturating_add(leftover_size);
         }
-        state.positions.insert(trader, position.clone());
-        MarketService::schedule_payload(MarketService::liquidation_payload(trader), delay);
-        self.emit_event(MarketEvent::PositionOpened {
-            trader,
-            position: position.clone(),
-        })
-        .expect("event emission should succeed");
-        Ok(position)
+        state.positions.insert(existing.id, open_position.clone());
+
+        Ok(open_position)
     }
 
     #[export(unwrap_result)]
-    pub async fn add_margin(&mut self, amount: u128) -> Result<Position, MarketError> {
+    pub async fn add_margin(
+        &mut self,
+        position_id: u64,
+        amount: u128,
+    ) -> Result<OpenPosition, MarketError> {
         if amount == 0 {
             return Err(MarketError::InvalidMargin);
         }
-        let trader = self.resolve_trader(SessionRegistryAction::AddMargin).await?;
-        let margin_vault = self.state.borrow().config.margin_vault;
+        let trader = self.resolve_trader(TraderAction::AddMargin).await?;
+        let margin_vault = {
+            let state = self.state.borrow();
+            let _ = MarketService::trader_position(&state, trader, position_id)?;
+            state.config.margin_vault()
+        };
         if let Some(vault_id) = margin_vault {
             MarketService::lock_in_vault(vault_id, trader, amount).await?;
         }
 
-        let mut state = self.state.borrow_mut();
-        let position = state.positions.get_mut(&trader).ok_or(MarketError::NoPosition)?;
-        position.margin = position.margin.saturating_add(amount);
-        self.emit_event(MarketEvent::MarginAdded {
-            trader,
-            new_margin: position.margin,
-        })
-        .expect("event emission should succeed");
-        Ok(position.clone())
+        let updated_position = {
+            let mut state = self.state.borrow_mut();
+            let position = state
+                .positions
+                .get_mut(&position_id)
+                .ok_or(MarketError::NoPosition)?;
+            if position.trader != trader {
+                return Err(MarketError::PositionNotOwned);
+            }
+            position.position.margin = position.position.margin.saturating_add(amount);
+            position.clone()
+        };
+
+        Ok(updated_position)
     }
 
     #[export(unwrap_result)]
-    pub async fn close_position(&mut self, size: u128) -> Result<ClosedPosition, MarketError> {
-        let trader = self.resolve_trader(SessionRegistryAction::Trade).await?;
+    pub async fn close_position(
+        &mut self,
+        position_id: u64,
+        size: u128,
+    ) -> Result<ClosedPosition, MarketError> {
+        let trader = self.resolve_trader(TraderAction::Trade).await?;
         let (position, mark_price, cumulative_funding_rate_bps, pool_id, vault_id) = {
             let state = self.state.borrow();
+            let open_position = MarketService::trader_position(&state, trader, position_id)?;
             (
-                state.positions.get(&trader).cloned().ok_or(MarketError::NoPosition)?,
+                open_position.position,
                 state.snapshot.mark_price,
                 state.snapshot.cumulative_funding_rate_bps,
-                state.config.liquidity_pool,
-                state.config.margin_vault,
+                state.config.liquidity_pool(),
+                state.config.margin_vault(),
             )
         };
 
         let was_long = position.size > 0;
-        let reduced_size = size.min(position.size.unsigned_abs());
+        let reduced_size = size;
         let released_notional =
             notional_to_collateral(reduced_size, mark_price).ok_or(MarketError::InvalidSize)?;
         let (preview, close) =
@@ -541,8 +980,14 @@ impl MarketService<'_> {
             .await?;
         }
         if let Some(vault_id) = vault_id {
-            MarketService::settle_in_vault(vault_id, trader, close.released_margin, close.payout, pool_id)
-                .await?;
+            MarketService::settle_in_vault(
+                vault_id,
+                trader,
+                close.released_margin,
+                close.payout,
+                pool_id.unwrap_or_else(zero_actor_id),
+            )
+            .await?;
         }
 
         let mut state = self.state.borrow_mut();
@@ -554,16 +999,18 @@ impl MarketService<'_> {
                 state.snapshot.open_interest_short.saturating_sub(reduced_size);
         }
         if preview.size == 0 {
-            state.positions.remove(&trader);
+            let _ = MarketService::remove_position(&mut state, position_id);
         } else {
-            state.positions.insert(trader, preview);
+            state.positions.insert(
+                position_id,
+                OpenPosition {
+                    id: position_id,
+                    trader,
+                    position: preview,
+                },
+            );
         }
 
-        self.emit_event(MarketEvent::PositionClosed {
-            trader,
-            close: close.clone(),
-        })
-        .expect("event emission should succeed");
         Ok(close)
     }
 
@@ -579,75 +1026,83 @@ impl MarketService<'_> {
         state.snapshot.funding_rate_bps = new_rate;
         state.snapshot.cumulative_funding_rate_bps += new_rate;
         state.last_funding_block = MarketService::current_block();
-        let interval = state.config.risk.funding_interval_blocks;
-        MarketService::schedule_payload(MarketService::funding_payload(), interval);
-        self.emit_event(MarketEvent::FundingSettled {
-            funding_rate_bps: state.snapshot.funding_rate_bps,
-            cumulative_funding_rate_bps: state.snapshot.cumulative_funding_rate_bps,
-            block: state.last_funding_block,
-        })
-        .expect("event emission should succeed");
         Ok(state.snapshot)
     }
 
     #[export(unwrap_result)]
     pub async fn check_liquidation(&mut self, trader: ActorId) -> Result<bool, MarketError> {
-        let (position, mark_price, cumulative_funding_rate_bps, maintenance_bps, pool_id, vault_id) = {
+        let position_ids = {
             let state = self.state.borrow();
             MarketService::require_internal_or_owner(&state)?;
-            let Some(position) = state.positions.get(&trader).cloned() else {
-                return Ok(false);
-            };
-            (
-                position,
-                state.snapshot.mark_price,
-                state.snapshot.cumulative_funding_rate_bps,
-                state.config.risk.maintenance_margin_bps,
-                state.config.liquidity_pool,
-                state.config.margin_vault,
-            )
+            MarketService::trader_position_ids(&state, trader)
         };
-
-        let equity = MarketService::equity(&position, mark_price, cumulative_funding_rate_bps)?;
-        let maintenance =
-            MarketService::maintenance_margin(&position, mark_price, maintenance_bps)?;
-        if equity <= maintenance as i128 {
-            let released_notional =
-                notional_to_collateral(position.size.unsigned_abs(), mark_price)
-                    .ok_or(MarketError::InvalidSize)?;
-            if let Some(pool_id) = pool_id {
-                MarketService::release_in_pool(pool_id, released_notional).await?;
-            }
-            if let Some(vault_id) = vault_id {
-                MarketService::slash_in_vault(vault_id, trader, position.margin, pool_id).await?;
-            }
-
-            let mut state = self.state.borrow_mut();
-            if position.size > 0 {
-                state.snapshot.open_interest_long = state
-                    .snapshot
-                    .open_interest_long
-                    .saturating_sub(position.size.unsigned_abs());
-            } else {
-                state.snapshot.open_interest_short = state
-                    .snapshot
-                    .open_interest_short
-                    .saturating_sub(position.size.unsigned_abs());
-            }
-            state.positions.remove(&trader);
-            self.emit_event(MarketEvent::Liquidated {
-                trader,
-                mark_price: state.snapshot.mark_price,
-                equity,
-                maintenance_margin: maintenance,
-            })
-            .expect("event emission should succeed");
-            return Ok(true);
+        if position_ids.is_empty() {
+            return Ok(false);
         }
 
-        let delay = self.state.borrow().config.risk.liquidation_delay_blocks;
-        MarketService::schedule_payload(MarketService::liquidation_payload(trader), delay);
-        Ok(false)
+        let mut liquidated_any = false;
+
+        for position_id in position_ids {
+            let (open_position, mark_price, cumulative_funding_rate_bps, maintenance_bps, pool_id, vault_id) = {
+                let state = self.state.borrow();
+                let Some(open_position) = state.positions.get(&position_id).cloned() else {
+                    continue;
+                };
+                (
+                    open_position,
+                    state.snapshot.mark_price,
+                    state.snapshot.cumulative_funding_rate_bps,
+                    state.config.risk.maintenance_margin_bps,
+                    state.config.liquidity_pool(),
+                    state.config.margin_vault(),
+                )
+            };
+
+            let equity = MarketService::equity(
+                &open_position.position,
+                mark_price,
+                cumulative_funding_rate_bps,
+            )?;
+            let maintenance = MarketService::maintenance_margin(
+                &open_position.position,
+                mark_price,
+                maintenance_bps,
+            )?;
+            if equity <= maintenance as i128 {
+                let released_notional =
+                    notional_to_collateral(open_position.position.size.unsigned_abs(), mark_price)
+                        .ok_or(MarketError::InvalidSize)?;
+                if let Some(pool_id) = pool_id {
+                    MarketService::release_in_pool(pool_id, released_notional).await?;
+                }
+                if let Some(vault_id) = vault_id {
+                    MarketService::slash_in_vault(
+                        vault_id,
+                        open_position.trader,
+                        open_position.position.margin,
+                        pool_id.unwrap_or_else(zero_actor_id),
+                    )
+                    .await?;
+                }
+
+                let mut state = self.state.borrow_mut();
+                if open_position.position.size > 0 {
+                    state.snapshot.open_interest_long = state
+                        .snapshot
+                        .open_interest_long
+                        .saturating_sub(open_position.position.size.unsigned_abs());
+                } else {
+                    state.snapshot.open_interest_short = state
+                        .snapshot
+                        .open_interest_short
+                        .saturating_sub(open_position.position.size.unsigned_abs());
+                }
+                let _ = MarketService::remove_position(&mut state, position_id);
+                liquidated_any = true;
+            }
+        }
+
+        Ok(liquidated_any)
     }
 
     #[export]
@@ -661,8 +1116,32 @@ impl MarketService<'_> {
     }
 
     #[export]
-    pub fn position(&self, trader: ActorId) -> Option<Position> {
-        self.state.borrow().positions.get(&trader).cloned()
+    pub fn position(&self, position_id: u64) -> PositionLookup {
+        let position = self.state.borrow().positions.get(&position_id).cloned();
+        PositionLookup {
+            found: position.is_some(),
+            position: position.unwrap_or(OpenPosition {
+                id: 0,
+                trader: zero_actor_id(),
+                position: Position {
+                    size: 0,
+                    entry_price: 0,
+                    margin: 0,
+                    leverage: 0,
+                    last_funding_rate_bps: 0,
+                    opened_at: 0,
+                },
+            }),
+        }
+    }
+
+    #[export]
+    pub fn positions(&self, trader: ActorId) -> Vec<OpenPosition> {
+        let state = self.state.borrow();
+        MarketService::trader_position_ids(&state, trader)
+            .into_iter()
+            .filter_map(|position_id| state.positions.get(&position_id).cloned())
+            .collect()
     }
 }
 
@@ -688,10 +1167,10 @@ impl Program {
                 open_interest_short: 0,
             },
             last_funding_block: exec::block_height(),
+            next_position_id: 1,
             positions: BTreeMap::new(),
+            trader_positions: BTreeMap::new(),
         };
-        let delay = state.config.risk.funding_interval_blocks;
-        MarketService::schedule_payload(MarketService::funding_payload(), delay);
         Self {
             state: RefCell::new(state),
         }
@@ -699,5 +1178,265 @@ impl Program {
 
     pub fn market(&self) -> MarketService<'_> {
         MarketService::new(&self.state)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+alloy_sol_types::sol! {
+    struct ClosedPositionSol {
+        int128 realized_pnl;
+        int128 funding_paid;
+        uint128 released_margin;
+        uint128 payout;
+        uint128 remaining_margin;
+    }
+
+    struct OpenPositionSol {
+        uint64 id;
+        address trader;
+        int128 size;
+        uint128 entry_price;
+        uint128 margin;
+        uint16 leverage;
+        int128 last_funding_rate_bps;
+        uint64 opened_at;
+    }
+
+    struct PositionLookupSol {
+        bool found;
+        OpenPositionSol position;
+    }
+
+    struct MarketConfigSol {
+        address owner;
+        uint8 asset;
+        address oracle_service;
+        address margin_vault;
+        address liquidity_pool;
+        address session_registry;
+        uint16 initial_margin_bps;
+        uint16 maintenance_margin_bps;
+        uint16 max_leverage;
+        uint32 funding_interval_blocks;
+        uint32 liquidation_delay_blocks;
+        int16 max_funding_velocity_bps;
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<ClosedPositionSol> for ClosedPosition {
+    fn from(value: ClosedPositionSol) -> Self {
+        Self {
+            realized_pnl: value.realized_pnl,
+            funding_paid: value.funding_paid,
+            released_margin: value.released_margin,
+            payout: value.payout,
+            remaining_margin: value.remaining_margin,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<ClosedPosition> for ClosedPositionSol {
+    fn from(value: ClosedPosition) -> Self {
+        Self {
+            realized_pnl: value.realized_pnl,
+            funding_paid: value.funding_paid,
+            released_margin: value.released_margin,
+            payout: value.payout,
+            remaining_margin: value.remaining_margin,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for ClosedPosition {
+    type SolType = ClosedPositionSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<ClosedPositionSol> for ClosedPosition {
+    fn stv_to_tokens(&self) -> <ClosedPositionSol as SolType>::Token<'_> {
+        let value: ClosedPositionSol = self.clone().into();
+        <ClosedPositionSol as SolTypeValue<ClosedPositionSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: ClosedPositionSol = self.clone().into();
+        <ClosedPositionSol as SolTypeValue<ClosedPositionSol>>::stv_abi_encode_packed_to(
+            &value, out,
+        );
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: ClosedPositionSol = self.clone().into();
+        <ClosedPositionSol as SolTypeValue<ClosedPositionSol>>::stv_eip712_data_word(&value)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<OpenPositionSol> for OpenPosition {
+    fn from(value: OpenPositionSol) -> Self {
+        Self {
+            id: value.id,
+            trader: value.trader.into(),
+            position: Position {
+                size: value.size,
+                entry_price: value.entry_price,
+                margin: value.margin,
+                leverage: value.leverage,
+                last_funding_rate_bps: value.last_funding_rate_bps,
+                opened_at: value.opened_at,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<OpenPosition> for OpenPositionSol {
+    fn from(value: OpenPosition) -> Self {
+        Self {
+            id: value.id,
+            trader: value.trader.into(),
+            size: value.position.size,
+            entry_price: value.position.entry_price,
+            margin: value.position.margin,
+            leverage: value.position.leverage,
+            last_funding_rate_bps: value.position.last_funding_rate_bps,
+            opened_at: value.position.opened_at,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for OpenPosition {
+    type SolType = OpenPositionSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<OpenPositionSol> for OpenPosition {
+    fn stv_to_tokens(&self) -> <OpenPositionSol as SolType>::Token<'_> {
+        let value: OpenPositionSol = self.clone().into();
+        <OpenPositionSol as SolTypeValue<OpenPositionSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: OpenPositionSol = self.clone().into();
+        <OpenPositionSol as SolTypeValue<OpenPositionSol>>::stv_abi_encode_packed_to(&value, out);
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: OpenPositionSol = self.clone().into();
+        <OpenPositionSol as SolTypeValue<OpenPositionSol>>::stv_eip712_data_word(&value)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<PositionLookupSol> for PositionLookup {
+    fn from(value: PositionLookupSol) -> Self {
+        Self {
+            found: value.found,
+            position: value.position.into(),
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<PositionLookup> for PositionLookupSol {
+    fn from(value: PositionLookup) -> Self {
+        Self {
+            found: value.found,
+            position: value.position.into(),
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for PositionLookup {
+    type SolType = PositionLookupSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<PositionLookupSol> for PositionLookup {
+    fn stv_to_tokens(&self) -> <PositionLookupSol as SolType>::Token<'_> {
+        let value: PositionLookupSol = self.clone().into();
+        <PositionLookupSol as SolTypeValue<PositionLookupSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: PositionLookupSol = self.clone().into();
+        <PositionLookupSol as SolTypeValue<PositionLookupSol>>::stv_abi_encode_packed_to(
+            &value, out,
+        );
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: PositionLookupSol = self.clone().into();
+        <PositionLookupSol as SolTypeValue<PositionLookupSol>>::stv_eip712_data_word(&value)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<MarketConfigSol> for MarketConfig {
+    fn from(value: MarketConfigSol) -> Self {
+        Self {
+            owner: value.owner.into(),
+            asset: decode_asset(value.asset),
+            oracle_service: value.oracle_service.into(),
+            margin_vault: value.margin_vault.into(),
+            liquidity_pool: value.liquidity_pool.into(),
+            session_registry: value.session_registry.into(),
+            risk: MarketRiskConfig {
+                initial_margin_bps: value.initial_margin_bps,
+                maintenance_margin_bps: value.maintenance_margin_bps,
+                max_leverage: value.max_leverage,
+                funding_interval_blocks: value.funding_interval_blocks,
+                liquidation_delay_blocks: value.liquidation_delay_blocks,
+                max_funding_velocity_bps: value.max_funding_velocity_bps,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<MarketConfig> for MarketConfigSol {
+    fn from(value: MarketConfig) -> Self {
+        Self {
+            owner: value.owner.into(),
+            asset: encode_asset(value.asset),
+            oracle_service: value.oracle_service.into(),
+            margin_vault: value.margin_vault.into(),
+            liquidity_pool: value.liquidity_pool.into(),
+            session_registry: value.session_registry.into(),
+            initial_margin_bps: value.risk.initial_margin_bps,
+            maintenance_margin_bps: value.risk.maintenance_margin_bps,
+            max_leverage: value.risk.max_leverage,
+            funding_interval_blocks: value.risk.funding_interval_blocks,
+            liquidation_delay_blocks: value.risk.liquidation_delay_blocks,
+            max_funding_velocity_bps: value.risk.max_funding_velocity_bps,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for MarketConfig {
+    type SolType = MarketConfigSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<MarketConfigSol> for MarketConfig {
+    fn stv_to_tokens(&self) -> <MarketConfigSol as SolType>::Token<'_> {
+        let value: MarketConfigSol = self.clone().into();
+        <MarketConfigSol as SolTypeValue<MarketConfigSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: MarketConfigSol = self.clone().into();
+        <MarketConfigSol as SolTypeValue<MarketConfigSol>>::stv_abi_encode_packed_to(&value, out);
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: MarketConfigSol = self.clone().into();
+        <MarketConfigSol as SolTypeValue<MarketConfigSol>>::stv_eip712_data_word(&value)
     }
 }

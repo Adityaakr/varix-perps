@@ -1,10 +1,10 @@
 type MarketConfig = struct {
   owner: actor_id,
   asset: Asset,
-  oracle_service: opt actor_id,
-  margin_vault: opt actor_id,
-  liquidity_pool: opt actor_id,
-  session_registry: opt actor_id,
+  oracle_service: actor_id,
+  margin_vault: actor_id,
+  liquidity_pool: actor_id,
+  session_registry: actor_id,
   risk: MarketRiskConfig,
 };
 
@@ -17,17 +17,23 @@ type Asset = enum {
 type MarketRiskConfig = struct {
   initial_margin_bps: u16,
   maintenance_margin_bps: u16,
-  max_leverage: u8,
+  max_leverage: u16,
   funding_interval_blocks: u32,
   liquidation_delay_blocks: u32,
   max_funding_velocity_bps: i16,
+};
+
+type OpenPosition = struct {
+  id: u64,
+  trader: actor_id,
+  position: Position,
 };
 
 type Position = struct {
   size: i128,
   entry_price: u128,
   margin: u128,
-  leverage: u8,
+  leverage: u16,
   last_funding_rate_bps: i128,
   opened_at: u64,
 };
@@ -54,49 +60,25 @@ type MarketSnapshot = struct {
   open_interest_short: u128,
 };
 
+type PositionLookup = struct {
+  found: bool,
+  position: OpenPosition,
+};
+
 constructor {
   Create : (config: MarketConfig, initial_mark_price: u128, initial_index_price: u128);
 };
 
 service Market {
-  AddMargin : (amount: u128) -> Position;
+  AddMargin : (position_id: u64, amount: u128) -> OpenPosition;
   CheckLiquidation : (trader: actor_id) -> bool;
-  ClosePosition : (size: u128) -> ClosedPosition;
-  OpenPosition : (side: Side, size: u128, leverage: u8, margin: u128, _max_slippage_bps: u16) -> Position;
+  ClosePosition : (position_id: u64, size: u128) -> ClosedPosition;
+  OpenPosition : (side: Side, size: u128, leverage: u16, margin: u128, _max_slippage_bps: u16) -> OpenPosition;
   SettleFunding : () -> MarketSnapshot;
   UpdatePrice : (mark_price: u128, index_price: u128) -> MarketSnapshot;
   query Config : () -> MarketConfig;
   query MarketState : () -> MarketSnapshot;
-  query Position : (trader: actor_id) -> opt Position;
-
-  events {
-    PriceUpdated: struct {
-      mark_price: u128,
-      index_price: u128,
-    };
-    PositionOpened: struct {
-      trader: actor_id,
-      position: Position,
-    };
-    PositionClosed: struct {
-      trader: actor_id,
-      close: ClosedPosition,
-    };
-    MarginAdded: struct {
-      trader: actor_id,
-      new_margin: u128,
-    };
-    FundingSettled: struct {
-      funding_rate_bps: i128,
-      cumulative_funding_rate_bps: i128,
-      block: u32,
-    };
-    Liquidated: struct {
-      trader: actor_id,
-      mark_price: u128,
-      equity: i128,
-      maintenance_margin: u128,
-    };
-  }
+  query Position : (position_id: u64) -> PositionLookup;
+  query Positions : (trader: actor_id) -> vec OpenPosition;
 };
 

@@ -49,6 +49,7 @@ pub mod market {
         type Env: sails_rs::client::GearEnv;
         fn add_margin(
             &mut self,
+            position_id: u64,
             amount: u128,
         ) -> sails_rs::client::PendingCall<io::AddMargin, Self::Env>;
         fn check_liquidation(
@@ -57,13 +58,14 @@ pub mod market {
         ) -> sails_rs::client::PendingCall<io::CheckLiquidation, Self::Env>;
         fn close_position(
             &mut self,
+            position_id: u64,
             size: u128,
         ) -> sails_rs::client::PendingCall<io::ClosePosition, Self::Env>;
         fn open_position(
             &mut self,
             side: Side,
             size: u128,
-            leverage: u8,
+            leverage: u16,
             margin: u128,
             _max_slippage_bps: u16,
         ) -> sails_rs::client::PendingCall<io::OpenPosition, Self::Env>;
@@ -78,17 +80,22 @@ pub mod market {
         fn market_state(&self) -> sails_rs::client::PendingCall<io::MarketState, Self::Env>;
         fn position(
             &self,
-            trader: ActorId,
+            position_id: u64,
         ) -> sails_rs::client::PendingCall<io::Position, Self::Env>;
+        fn positions(
+            &self,
+            trader: ActorId,
+        ) -> sails_rs::client::PendingCall<io::Positions, Self::Env>;
     }
     pub struct MarketImpl;
     impl<E: sails_rs::client::GearEnv> Market for sails_rs::client::Service<MarketImpl, E> {
         type Env = E;
         fn add_margin(
             &mut self,
+            position_id: u64,
             amount: u128,
         ) -> sails_rs::client::PendingCall<io::AddMargin, Self::Env> {
-            self.pending_call((amount,))
+            self.pending_call((position_id, amount))
         }
         fn check_liquidation(
             &mut self,
@@ -98,15 +105,16 @@ pub mod market {
         }
         fn close_position(
             &mut self,
+            position_id: u64,
             size: u128,
         ) -> sails_rs::client::PendingCall<io::ClosePosition, Self::Env> {
-            self.pending_call((size,))
+            self.pending_call((position_id, size))
         }
         fn open_position(
             &mut self,
             side: Side,
             size: u128,
-            leverage: u8,
+            leverage: u16,
             margin: u128,
             _max_slippage_bps: u16,
         ) -> sails_rs::client::PendingCall<io::OpenPosition, Self::Env> {
@@ -132,72 +140,30 @@ pub mod market {
         }
         fn position(
             &self,
-            trader: ActorId,
+            position_id: u64,
         ) -> sails_rs::client::PendingCall<io::Position, Self::Env> {
+            self.pending_call((position_id,))
+        }
+        fn positions(
+            &self,
+            trader: ActorId,
+        ) -> sails_rs::client::PendingCall<io::Positions, Self::Env> {
             self.pending_call((trader,))
         }
     }
 
     pub mod io {
         use super::*;
-        sails_rs::io_struct_impl!(AddMargin (amount: u128) -> super::Position);
+        sails_rs::io_struct_impl!(AddMargin (position_id: u64, amount: u128) -> super::OpenPosition);
         sails_rs::io_struct_impl!(CheckLiquidation (trader: ActorId) -> bool);
-        sails_rs::io_struct_impl!(ClosePosition (size: u128) -> super::ClosedPosition);
-        sails_rs::io_struct_impl!(OpenPosition (side: super::Side, size: u128, leverage: u8, margin: u128, _max_slippage_bps: u16) -> super::Position);
+        sails_rs::io_struct_impl!(ClosePosition (position_id: u64, size: u128) -> super::ClosedPosition);
+        sails_rs::io_struct_impl!(OpenPosition (side: super::Side, size: u128, leverage: u16, margin: u128, _max_slippage_bps: u16) -> super::OpenPosition);
         sails_rs::io_struct_impl!(SettleFunding () -> super::MarketSnapshot);
         sails_rs::io_struct_impl!(UpdatePrice (mark_price: u128, index_price: u128) -> super::MarketSnapshot);
         sails_rs::io_struct_impl!(Config () -> super::MarketConfig);
         sails_rs::io_struct_impl!(MarketState () -> super::MarketSnapshot);
-        sails_rs::io_struct_impl!(Position (trader: ActorId) -> Option<super::Position>);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub mod events {
-        use super::*;
-        #[derive(PartialEq, Debug, Encode, Decode)]
-        #[codec(crate = sails_rs::scale_codec)]
-        pub enum MarketEvents {
-            PriceUpdated {
-                mark_price: u128,
-                index_price: u128,
-            },
-            PositionOpened {
-                trader: ActorId,
-                position: Position,
-            },
-            PositionClosed {
-                trader: ActorId,
-                close: ClosedPosition,
-            },
-            MarginAdded {
-                trader: ActorId,
-                new_margin: u128,
-            },
-            FundingSettled {
-                funding_rate_bps: i128,
-                cumulative_funding_rate_bps: i128,
-                block: u32,
-            },
-            Liquidated {
-                trader: ActorId,
-                mark_price: u128,
-                equity: i128,
-                maintenance_margin: u128,
-            },
-        }
-        impl sails_rs::client::Event for MarketEvents {
-            const EVENT_NAMES: &'static [Route] = &[
-                "PriceUpdated",
-                "PositionOpened",
-                "PositionClosed",
-                "MarginAdded",
-                "FundingSettled",
-                "Liquidated",
-            ];
-        }
-        impl sails_rs::client::ServiceWithEvents for MarketImpl {
-            type Event = MarketEvents;
-        }
+        sails_rs::io_struct_impl!(Position (position_id: u64) -> super::PositionLookup);
+        sails_rs::io_struct_impl!(Positions (trader: ActorId) -> Vec<super::OpenPosition>);
     }
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
@@ -206,10 +172,10 @@ pub mod market {
 pub struct MarketConfig {
     pub owner: ActorId,
     pub asset: Asset,
-    pub oracle_service: Option<ActorId>,
-    pub margin_vault: Option<ActorId>,
-    pub liquidity_pool: Option<ActorId>,
-    pub session_registry: Option<ActorId>,
+    pub oracle_service: ActorId,
+    pub margin_vault: ActorId,
+    pub liquidity_pool: ActorId,
+    pub session_registry: ActorId,
     pub risk: MarketRiskConfig,
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
@@ -226,10 +192,18 @@ pub enum Asset {
 pub struct MarketRiskConfig {
     pub initial_margin_bps: u16,
     pub maintenance_margin_bps: u16,
-    pub max_leverage: u8,
+    pub max_leverage: u16,
     pub funding_interval_blocks: u32,
     pub liquidation_delay_blocks: u32,
     pub max_funding_velocity_bps: i16,
+}
+#[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub struct OpenPosition {
+    pub id: u64,
+    pub trader: ActorId,
+    pub position: Position,
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
@@ -238,7 +212,7 @@ pub struct Position {
     pub size: i128,
     pub entry_price: u128,
     pub margin: u128,
-    pub leverage: u8,
+    pub leverage: u16,
     pub last_funding_rate_bps: i128,
     pub opened_at: u64,
 }
@@ -269,4 +243,11 @@ pub struct MarketSnapshot {
     pub cumulative_funding_rate_bps: i128,
     pub open_interest_long: u128,
     pub open_interest_short: u128,
+}
+#[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub struct PositionLookup {
+    pub found: bool,
+    pub position: OpenPosition,
 }
