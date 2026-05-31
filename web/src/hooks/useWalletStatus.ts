@@ -1,6 +1,6 @@
 import { useAccount } from "@gear-js/react-hooks";
 
-type WalletStatus = {
+export type WalletStatus = {
   accountLabel: string | null;
   connectLabel: string;
   disabledReason: string | null;

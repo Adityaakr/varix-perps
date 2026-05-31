@@ -1,5 +1,6 @@
 import { useAccount, useAlert, useApi, useSails } from "@gear-js/react-hooks";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { HexString } from "@gear-js/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import demoUsdcIdl from "../idl/demo-usdc-vft.idl?raw";
 import liquidityPoolIdl from "../idl/liquidity-pool.idl?raw";
 import marginVaultIdl from "../idl/margin-vault.idl?raw";
@@ -10,12 +11,14 @@ import {
   INDEXER_HTTP_URL,
   VARA_DEMO_USDC_PROGRAM_ID,
   VARA_LIQUIDITY_POOL_PROGRAM_ID,
+  VARA_MARKET_PROGRAM_IDS,
   VARA_MARGIN_VAULT_PROGRAM_ID,
   VARA_ORACLE_SERVICE_PROGRAM_ID,
   VARA_RPC_URL,
   VARA_SESSION_DURATION_BLOCKS,
   VARA_SESSION_FUNDING_AMOUNT,
   VARA_SESSION_REGISTRY_PROGRAM_ID,
+  VARA_VOUCHER_SPONSOR_URL,
   getMarketProgramId
 } from "../lib/config";
 import { clearSessionSigner, getOrCreateSessionSigner, loadSessionSigner } from "../lib/sessionAccount";
@@ -31,8 +34,9 @@ import type {
   VaraAccountSnapshot,
   VaraLpAccount,
   VaraMarketSnapshot,
+  VaraOpenPositionSnapshot,
   VaraPoolState,
-  VaraPositionSnapshot,
+  VaraSponsoredVoucherBundle,
   VaraSessionPermissions,
   VaraSessionRecord
 } from "../types";
@@ -41,6 +45,11 @@ const ZERO_ACTOR = `0x${"0".repeat(64)}`;
 const PRICE_SCALE = 100_000_000n;
 const PRICE_TO_COLLATERAL_SCALE = 100n;
 const SIZE_FROM_NOTIONAL_SCALE = PRICE_SCALE * PRICE_TO_COLLATERAL_SCALE;
+const MAX_U128 = (1n << 128n) - 1n;
+const TRADE_GAS_LIMIT = 750_000_000_000n;
+const SESSION_GAS_FUNDING_FALLBACK = 5_000_000_000_000n;
+const SESSION_MIN_NATIVE_BALANCE = 1_000_000_000_000n;
+const POSITION_OVERRIDE_STORAGE_PREFIX = "varix:position-display-overrides:";
 
 function formatUnits(value: bigint, decimals: number) {
   const negative = value < 0n;
@@ -121,29 +130,38 @@ function parseMarket(asset: Asset, market: VaraMarketSnapshot): MarketSnapshot {
   };
 }
 
-function parsePosition(asset: Asset, trader: string, market: VaraMarketSnapshot, position: VaraPositionSnapshot): PositionSnapshot {
+function parsePosition(
+  asset: Asset,
+  market: VaraMarketSnapshot,
+  openPosition: VaraOpenPositionSnapshot,
+  displayEntryOverride?: bigint | null
+): PositionSnapshot {
+  const position = openPosition.position;
   const positionSize = toBigInt(position.size);
   const mark = toBigInt(market.mark_price);
   const entry = toBigInt(position.entry_price);
+  const displayEntry = displayEntryOverride ?? entry;
   const margin = toBigInt(position.margin);
   const openedAt = toBigInt(position.opened_at);
   const side = positionSize >= 0n ? "long" : "short";
   const size = positionSize >= 0n ? positionSize : -positionSize;
-  const pnlBase = (mark - entry) * positionSize;
+  const pnlBase = (mark - displayEntry) * positionSize;
   const pnl = pnlBase / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE;
   const liquidationPrice = size === 0n
-    ? entry
+    ? displayEntry
     : side === "long"
-      ? entry - (margin * PRICE_SCALE * PRICE_TO_COLLATERAL_SCALE) / size
-      : entry + (margin * PRICE_SCALE * PRICE_TO_COLLATERAL_SCALE) / size;
+      ? displayEntry - (margin * PRICE_SCALE * PRICE_TO_COLLATERAL_SCALE) / size
+      : displayEntry + (margin * PRICE_SCALE * PRICE_TO_COLLATERAL_SCALE) / size;
 
   return {
-    trader,
+    id: Number(toBigInt(openPosition.id)),
+    trader: openPosition.trader,
     asset,
     side,
     size: formatUnits(size, 8),
     notional: formatUnits((size * mark) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE, 6),
-    entryPrice: formatUnits(entry, 8),
+    entryPrice: formatUnits(displayEntry, 8),
+    markPrice: formatUnits(mark, 8),
     margin: formatUnits(margin, 6),
     leverage: Number(position.leverage),
     liquidationPrice: formatUnits(liquidationPrice, 8),
@@ -192,6 +210,56 @@ function parseVar(value: string) {
   const normalizedWhole = wholePart || "0";
   const normalizedFraction = `${fractionalPart}000000000000`.slice(0, 12);
   return BigInt(normalizedWhole) * 10n ** 12n + BigInt(normalizedFraction);
+}
+
+type PositionDisplayOverride = {
+  entryPrice: string;
+};
+
+function positionOverrideKey(asset: Asset, positionId: number) {
+  return `${asset}:${positionId}`;
+}
+
+function readPositionDisplayOverrides(owner: string): Record<string, PositionDisplayOverride> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const raw = window.localStorage.getItem(`${POSITION_OVERRIDE_STORAGE_PREFIX}${owner}`);
+    return raw ? JSON.parse(raw) as Record<string, PositionDisplayOverride> : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePositionDisplayOverride(owner: string, asset: Asset, positionId: number, entryPrice: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const overrides = readPositionDisplayOverrides(owner);
+  overrides[positionOverrideKey(asset, positionId)] = { entryPrice };
+  window.localStorage.setItem(`${POSITION_OVERRIDE_STORAGE_PREFIX}${owner}`, JSON.stringify(overrides));
+}
+
+function deletePositionDisplayOverride(owner: string, asset: Asset, positionId: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const overrides = readPositionDisplayOverrides(owner);
+  delete overrides[positionOverrideKey(asset, positionId)];
+  window.localStorage.setItem(`${POSITION_OVERRIDE_STORAGE_PREFIX}${owner}`, JSON.stringify(overrides));
+}
+
+function readDisplayEntryOverride(owner: string, asset: Asset, positionId: number) {
+  const override = readPositionDisplayOverrides(owner)[positionOverrideKey(asset, positionId)];
+  if (!override) {
+    return null;
+  }
+  const value = Number(override.entryPrice);
+  return Number.isFinite(value) && value > 0 ? decimalToBigInt(value, 8) : null;
 }
 
 function describeError(error: unknown) {
@@ -246,6 +314,87 @@ async function ensureSessionSignerFunded(api: any, owner: string) {
   await ensureDevFunded(api, signer.address);
 }
 
+async function readNativeBalance(api: any, address: string) {
+  const accountData = await api.query.system.account(address);
+  return BigInt(accountData.data.free.toString());
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+type SailsQuery = <T>(origin: string, value?: bigint, atBlock?: HexString, ...args: unknown[]) => Promise<T>;
+
+async function runSailsQuery<T>(query: SailsQuery | undefined, origin: string, ...args: unknown[]) {
+  if (!query) {
+    throw new Error("required Vara query is unavailable");
+  }
+
+  return query<T>(origin, 0n, undefined, ...args);
+}
+
+function uniqueActorIds(actors: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const actor of actors) {
+    if (!actor || actor === ZERO_ACTOR) {
+      continue;
+    }
+    const key = actor.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(actor);
+  }
+  return unique;
+}
+
+function dedupeOpenPositions(positions: VaraOpenPositionSnapshot[]) {
+  const byPosition = new Map<string, VaraOpenPositionSnapshot>();
+  for (const position of positions) {
+    byPosition.set(`${position.trader.toLowerCase()}:${toBigInt(position.id).toString()}`, position);
+  }
+  return Array.from(byPosition.values());
+}
+
+async function readPositionsForTraders(
+  positionsQuery: SailsQuery | undefined,
+  origin: string,
+  traders: Array<string | null | undefined>
+) {
+  const traderIds = uniqueActorIds(traders);
+  const positionGroups = await Promise.all(
+    traderIds.map((trader) => runSailsQuery<VaraOpenPositionSnapshot[]>(positionsQuery, origin, trader).catch(() => []))
+  );
+  return dedupeOpenPositions(positionGroups.flat());
+}
+
+async function waitForTokenAllowance(
+  allowanceQuery: SailsQuery | undefined,
+  owner: string,
+  spender: string,
+  minimum: bigint
+) {
+  const timeoutAt = Date.now() + 15_000;
+  let latest = 0n;
+  while (Date.now() < timeoutAt) {
+    latest = toBigInt(
+      await runSailsQuery<bigint | string | number | { toString(): string }>(allowanceQuery, owner, owner, spender)
+    );
+    if (latest >= minimum) {
+      return latest;
+    }
+    await sleep(500);
+  }
+
+  throw new Error(
+    `Token allowance did not settle in time. Visible allowance is ${formatUnits(latest, 6)} tUSDC, expected at least ${formatUnits(minimum, 6)} tUSDC.`
+  );
+}
+
 type PositionInput = {
   side: "long" | "short";
   notional: number;
@@ -253,7 +402,38 @@ type PositionInput = {
   maxSlippageBps: number;
 };
 
-export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: string | null, liveReferencePrice: number | null = null) {
+type SponsoredVoucherRequest = {
+  owner: string;
+  session?: string;
+  ownerPrograms: string[];
+  sessionPrograms: string[];
+};
+
+const ALL_MARKET_PROGRAM_IDS = Object.values(VARA_MARKET_PROGRAM_IDS).filter((programId) => Boolean(programId));
+
+function sameSponsoredVoucherBundle(left: VaraSponsoredVoucherBundle, right: VaraSponsoredVoucherBundle) {
+  return (
+    (left.owner?.voucherId ?? null) === (right.owner?.voucherId ?? null) &&
+    (left.session?.voucherId ?? null) === (right.session?.voucherId ?? null)
+  );
+}
+
+async function waitForTransactionResponse(result: { response: () => Promise<unknown> }, label: string) {
+  await Promise.race([
+    result.response(),
+    sleep(45_000).then(() => {
+      throw new Error(`${label} is still pending after 45s. Switch signless off or refresh the session and try again.`);
+    })
+  ]);
+}
+
+export function useVaraProgram(
+  asset: Asset,
+  mode: RuntimeMode,
+  sessionToken: string | null,
+  liveReferencePrice: number | null = null,
+  preferSignless = false
+) {
   const { account } = useAccount();
   const { api, isApiReady } = useApi();
   const alert = useAlert();
@@ -266,13 +446,18 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
   const oracleSails = useSails({ idl: oracleServiceIdl, programId: VARA_ORACLE_SERVICE_PROGRAM_ID });
   const [onchainAccount, setOnchainAccount] = useState<AccountSnapshot | null>(null);
   const [onchainMarket, setOnchainMarket] = useState<MarketSnapshot | null>(null);
-  const [onchainPosition, setOnchainPosition] = useState<PositionSnapshot | null>(null);
+  const [onchainPositions, setOnchainPositions] = useState<PositionSnapshot[]>([]);
   const [onchainSession, setOnchainSession] = useState<ReturnType<typeof parseSession>>(null);
   const [onchainPool, setOnchainPool] = useState<{ totalLiquidity: string; maxOpenNotional: string; reservedNotional: string } | null>(null);
   const [localSessionSigner, setLocalSessionSigner] = useState<LocalSessionSigner | null>(null);
+  const [sponsoredVouchers, setSponsoredVouchers] = useState<VaraSponsoredVoucherBundle>({ owner: null, session: null });
   const [refreshTick, setRefreshTick] = useState(0);
+  const [actionPending, setActionPending] = useState(false);
+  const actionPendingRef = useRef(false);
+  const sponsorCooldownUntilRef = useRef(0);
 
   const walletAddress = account?.decodedAddress ?? ZERO_ACTOR;
+  const sponsorConfigured = Boolean(VARA_VOUCHER_SPONSOR_URL);
   const isVaraReady = mode === "vara" && Boolean(
     account &&
       isApiReady &&
@@ -296,13 +481,13 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
         !vaultSails.data ||
         !poolSails.data ||
         !oracleSails.data ||
-        !account
+        walletAddress === ZERO_ACTOR
       ) {
-        setOnchainAccount(null);
-        setOnchainMarket(null);
-        setOnchainPosition(null);
-        setOnchainSession(null);
-        setOnchainPool(null);
+        setOnchainAccount((current) => current === null ? current : null);
+        setOnchainMarket((current) => current === null ? current : null);
+        setOnchainPositions((current) => current.length === 0 ? current : []);
+        setOnchainSession((current) => current === null ? current : null);
+        setOnchainPool((current) => current === null ? current : null);
         return;
       }
 
@@ -312,11 +497,11 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
       const vaultService = vaultSails.data.services.Vault;
       const poolService = poolSails.data.services.Pool;
       if (!tokenService || !sessionRegistryService || !marketService || !vaultService || !poolService) {
-        setOnchainAccount(null);
-        setOnchainMarket(null);
-        setOnchainPosition(null);
-        setOnchainSession(null);
-        setOnchainPool(null);
+        setOnchainAccount((current) => current === null ? current : null);
+        setOnchainMarket((current) => current === null ? current : null);
+        setOnchainPositions((current) => current.length === 0 ? current : []);
+        setOnchainSession((current) => current === null ? current : null);
+        setOnchainPool((current) => current === null ? current : null);
         return;
       }
 
@@ -324,23 +509,27 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
         const activeSessionQuery = sessionRegistryService.queries.ActiveSession;
         const marketStateQuery = marketService.queries.MarketState;
         const vaultAccountQuery = vaultService.queries.Account;
-        const positionQuery = marketService.queries.Position;
+        const positionsQuery = marketService.queries.Positions;
         const balanceOfQuery = tokenService.queries.BalanceOf;
         const lpAccountQuery = poolService.queries.Account;
         const poolStateQuery = poolService.queries.PoolState;
-        if (!activeSessionQuery || !marketStateQuery || !vaultAccountQuery || !positionQuery || !balanceOfQuery || !lpAccountQuery || !poolStateQuery) {
+        if (!activeSessionQuery || !marketStateQuery || !vaultAccountQuery || !positionsQuery || !balanceOfQuery || !lpAccountQuery || !poolStateQuery) {
           throw new Error("required Vara queries are unavailable");
         }
 
-        const [session, market, vaultAccount, position, walletBalance, lpAccount, poolState] = await Promise.all([
-          activeSessionQuery<VaraSessionRecord | null>(walletAddress, undefined, undefined, walletAddress),
-          marketStateQuery<VaraMarketSnapshot>(walletAddress),
-          vaultAccountQuery<VaraAccountSnapshot>(walletAddress, undefined, undefined, walletAddress),
-          positionQuery<VaraPositionSnapshot | null>(walletAddress, undefined, undefined, walletAddress),
-          balanceOfQuery<bigint>(walletAddress, undefined, undefined, walletAddress),
-          lpAccountQuery<VaraLpAccount>(walletAddress, undefined, undefined, walletAddress),
-          poolStateQuery<VaraPoolState>(walletAddress)
+        const [session, market, vaultAccount, walletBalance, lpAccount, poolState] = await Promise.all([
+          runSailsQuery<VaraSessionRecord | null>(activeSessionQuery, walletAddress, walletAddress),
+          runSailsQuery<VaraMarketSnapshot>(marketStateQuery, walletAddress),
+          runSailsQuery<VaraAccountSnapshot>(vaultAccountQuery, walletAddress, walletAddress),
+          runSailsQuery<bigint>(balanceOfQuery, walletAddress, walletAddress),
+          runSailsQuery<VaraLpAccount>(lpAccountQuery, walletAddress, walletAddress),
+          runSailsQuery<VaraPoolState>(poolStateQuery, walletAddress)
         ]);
+        const positions = await readPositionsForTraders(
+          positionsQuery,
+          walletAddress,
+          [walletAddress, localSessionSigner?.actorId]
+        );
 
         if (cancelled) {
           return;
@@ -349,7 +538,27 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
         setOnchainSession(parseSession(session));
         setOnchainMarket(parseMarket(asset, market));
         setOnchainAccount(parseTraderAccount(vaultAccount, walletBalance, lpAccount.shares));
-        setOnchainPosition(position ? parsePosition(asset, account.address, market, position) : null);
+        setOnchainPositions(
+          positions.map((position) => {
+            const positionId = Number(toBigInt(position.id));
+            let displayEntryOverride = readDisplayEntryOverride(walletAddress, asset, positionId);
+            if (!displayEntryOverride && liveReferencePrice && liveReferencePrice > 0) {
+              displayEntryOverride = decimalToBigInt(liveReferencePrice, 8);
+              writePositionDisplayOverride(
+                walletAddress,
+                asset,
+                positionId,
+                formatUnits(displayEntryOverride, 8)
+              );
+            }
+            return parsePosition(
+              asset,
+              market,
+              position,
+              displayEntryOverride
+            );
+          })
+        );
         setOnchainPool(parsePoolState(poolState));
       } catch (error) {
         if (!cancelled) {
@@ -363,18 +572,18 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
     return () => {
       cancelled = true;
     };
-  }, [account, alert, asset, isVaraReady, marketSails.data, oracleSails.data, poolSails.data, refreshTick, sessionRegistrySails.data, tokenSails.data, vaultSails.data, walletAddress]);
+  }, [alert, asset, isVaraReady, liveReferencePrice, localSessionSigner?.actorId, marketSails.data, oracleSails.data, poolSails.data, refreshTick, sessionRegistrySails.data, tokenSails.data, vaultSails.data, walletAddress]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function hydrateSigner() {
-      if (!account) {
-        setLocalSessionSigner(null);
+      if (walletAddress === ZERO_ACTOR) {
+        setLocalSessionSigner((current) => current === null ? current : null);
         return;
       }
 
-      const signer = await loadSessionSigner(account.decodedAddress);
+      const signer = await loadSessionSigner(walletAddress);
       if (!cancelled) {
         setLocalSessionSigner(
           signer
@@ -393,7 +602,15 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
     return () => {
       cancelled = true;
     };
-  }, [account, refreshTick]);
+  }, [refreshTick, walletAddress]);
+
+  useEffect(() => {
+    if (walletAddress === ZERO_ACTOR) {
+      setSponsoredVouchers((current) => (
+        current.owner || current.session ? { owner: null, session: null } : current
+      ));
+    }
+  }, [walletAddress]);
 
   const refresh = useCallback(() => {
     setRefreshTick((value) => value + 1);
@@ -424,6 +641,12 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
 
   const runAction = useCallback(
     async <T>(title: string, pendingMessage: string, successMessage: string, execute: () => Promise<T>, refreshOnSuccess = true) => {
+      if (actionPendingRef.current) {
+        throw new Error("Another Vara transaction is already pending. Wait for it to finish before submitting again.");
+      }
+
+      actionPendingRef.current = true;
+      setActionPending(true);
       const alertId = alert.loading(pendingMessage, { title, timeout: 0 });
       try {
         const result = await execute();
@@ -443,6 +666,9 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           type: "error"
         });
         throw error;
+      } finally {
+        actionPendingRef.current = false;
+        setActionPending(false);
       }
     },
     [alert, refresh]
@@ -453,6 +679,182 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
       localSessionSigner &&
       onchainSession.sessionKey.toLowerCase() === localSessionSigner.actorId.toLowerCase()
   );
+  const sponsorModeEnabled = preferSignless && sponsorConfigured;
+  const signlessModeEnabled = preferSignless && hasSessionSigner;
+
+  const ensureSponsoredAccess = useCallback(async (sessionAddress?: string | null) => {
+    if (!account) {
+      throw new Error("wallet is not connected");
+    }
+    if (!sponsorModeEnabled) {
+      return { owner: null, session: null } as VaraSponsoredVoucherBundle;
+    }
+    if (Date.now() < sponsorCooldownUntilRef.current) {
+      return { owner: null, session: null } as VaraSponsoredVoucherBundle;
+    }
+
+    const ownerPrograms = Array.from(
+      new Set(
+        [
+          VARA_SESSION_REGISTRY_PROGRAM_ID,
+          VARA_DEMO_USDC_PROGRAM_ID,
+          VARA_MARGIN_VAULT_PROGRAM_ID,
+          VARA_LIQUIDITY_POOL_PROGRAM_ID,
+          ...ALL_MARKET_PROGRAM_IDS
+        ].filter((programId): programId is string => Boolean(programId))
+      )
+    );
+    const sessionPrograms = Array.from(
+      new Set(
+        [
+          VARA_MARGIN_VAULT_PROGRAM_ID,
+          ...ALL_MARKET_PROGRAM_IDS
+        ].filter((programId): programId is string => Boolean(programId))
+      )
+    );
+
+    const payload: SponsoredVoucherRequest = {
+      owner: account.decodedAddress,
+      ownerPrograms,
+      sessionPrograms
+    };
+    if (sessionAddress) {
+      payload.session = sessionAddress;
+    }
+
+    try {
+      const response = await fetch(`${VARA_VOUCHER_SPONSOR_URL}/api/vouchers/ensure`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({ error: "sponsor request failed" })) as { error?: string };
+        throw new Error(failure.error ?? `sponsor request failed: ${response.status}`);
+      }
+
+      const bundle = await response.json() as VaraSponsoredVoucherBundle;
+      sponsorCooldownUntilRef.current = 0;
+      setSponsoredVouchers((current) => sameSponsoredVoucherBundle(current, bundle) ? current : bundle);
+      return bundle;
+    } catch (error) {
+      sponsorCooldownUntilRef.current = Date.now() + 60_000;
+      console.error("voucher sponsor unavailable, falling back to signed/native flow", error);
+      return { owner: null, session: null } as VaraSponsoredVoucherBundle;
+    }
+  }, [account, sponsorModeEnabled]);
+
+  const applyOwnerContext = useCallback(async (tx: any, bundle?: VaraSponsoredVoucherBundle | null) => {
+    if (!account) {
+      throw new Error("wallet is not connected");
+    }
+
+    tx.withAccount(account.address, { signer: account.signer });
+    if (!sponsorModeEnabled) {
+      return null;
+    }
+
+    const currentBundle = bundle ?? (await ensureSponsoredAccess(null));
+    const ownerVoucherId = currentBundle.owner?.voucherId;
+    if (ownerVoucherId) {
+      tx.withVoucher(ownerVoucherId as HexString);
+    }
+    return ownerVoucherId ?? null;
+  }, [account, ensureSponsoredAccess, sponsorModeEnabled]);
+
+  const applySessionOrOwnerContext = useCallback(async (tx: any, bundle?: VaraSponsoredVoucherBundle | null) => {
+    if (!account) {
+      throw new Error("wallet is not connected");
+    }
+
+    if (signlessModeEnabled) {
+      await ensureSessionSignerFunded(api, account.decodedAddress);
+      const signer = await loadSessionSigner(account.decodedAddress);
+      if (!signer) {
+        throw new Error("local session signer is unavailable");
+      }
+      const currentBundle = bundle ?? (await ensureSponsoredAccess(signer.address));
+      const sessionVoucherId = currentBundle.session?.voucherId;
+      const sessionNativeBalance = api ? await readNativeBalance(api, signer.address) : 0n;
+      if (!sessionVoucherId && sessionNativeBalance < SESSION_MIN_NATIVE_BALANCE) {
+        const ownerVoucherId = await applyOwnerContext(tx, currentBundle);
+        return { signer: "owner" as const, voucherId: ownerVoucherId };
+      }
+
+      tx.withAccount(signer.pair);
+      if (sessionVoucherId) {
+        tx.withVoucher(sessionVoucherId as HexString);
+      }
+      return { signer: "session" as const, voucherId: sessionVoucherId ?? null };
+    }
+
+    const ownerVoucherId = await applyOwnerContext(tx, bundle);
+    return { signer: "owner" as const, voucherId: ownerVoucherId };
+  }, [account, api, applyOwnerContext, ensureSponsoredAccess, signlessModeEnabled]);
+
+  const ensureAllowance = useCallback(async (
+    allowanceQuery: SailsQuery | undefined,
+    approve: ((...args: unknown[]) => any) | undefined,
+    spender: string,
+    minimum: bigint,
+    bundle?: VaraSponsoredVoucherBundle | null
+  ) => {
+    if (!account) {
+      throw new Error("wallet is not connected");
+    }
+    if (!approve) {
+      throw new Error("approve function is unavailable");
+    }
+
+    const currentAllowance = toBigInt(
+      await runSailsQuery<bigint | string | number | { toString(): string }>(
+        allowanceQuery,
+        account.decodedAddress,
+        account.decodedAddress,
+        spender
+      )
+    );
+    if (currentAllowance >= minimum) {
+      return currentAllowance;
+    }
+
+    const approveTx = approve(spender, MAX_U128);
+    await applyOwnerContext(approveTx, bundle);
+    await approveTx.calculateGas();
+    await (await approveTx.signAndSend()).response();
+    return waitForTokenAllowance(allowanceQuery, account.decodedAddress, spender, minimum);
+  }, [account, applyOwnerContext]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateVouchers() {
+      if (walletAddress === ZERO_ACTOR || !sponsorModeEnabled) {
+        return;
+      }
+
+      try {
+        const bundle = await ensureSponsoredAccess(signlessModeEnabled ? localSessionSigner?.address ?? null : null);
+        if (!cancelled) {
+          setSponsoredVouchers((current) => sameSponsoredVoucherBundle(current, bundle) ? current : bundle);
+        }
+      } catch {
+        if (!cancelled) {
+          setSponsoredVouchers((current) => (
+            current.owner || current.session ? { owner: null, session: null } : current
+          ));
+        }
+      }
+    }
+
+    void hydrateVouchers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [localSessionSigner?.address, signlessModeEnabled, sponsorModeEnabled, walletAddress]);
 
   return useMemo(
     () => ({
@@ -461,11 +863,15 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
       isApiReady,
       onchainAccount,
       onchainMarket,
-      onchainPosition,
+      onchainPositions,
       onchainSession,
       onchainPool,
       localSessionSigner,
       hasSessionSigner,
+      signlessModeEnabled,
+      gaslessEnabled: sponsorModeEnabled && sponsoredVouchers.owner !== null,
+      signlessEnabled: sponsorModeEnabled && sponsoredVouchers.session !== null,
+      actionPending,
       syncMarketPrice,
       async fundWalletGas() {
         return runAction("Gas", "Funding wallet gas...", "Wallet funded with local VARA gas.", async () => {
@@ -479,18 +885,24 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
       async createSession(name?: string) {
         if (mode === "vara") {
           return runAction("Session", "Registering Vara session...", "Session registered and ready.", async () => {
-            if (!isVaraReady || !sessionRegistrySails.data || !account) {
-              throw new Error("wallet or session registry is not ready");
+            if (!isVaraReady || !sessionRegistrySails.data || !tokenSails.data || !account) {
+              throw new Error("wallet, token, or session registry is not ready");
             }
 
             const sessionRegistryService = sessionRegistrySails.data.services.SessionRegistry;
+            const tokenService = tokenSails.data.services.Token;
             if (!sessionRegistryService) {
               throw new Error("session registry service is unavailable");
             }
+            if (!tokenService) {
+              throw new Error("token service is unavailable");
+            }
 
             const registerSession = sessionRegistryService.functions.RegisterSession;
-            if (!registerSession) {
-              throw new Error("register session function is unavailable");
+            const approve = tokenService.functions.Approve;
+            const allowanceQuery = tokenService.queries.Allowance;
+            if (!registerSession || !approve || !allowanceQuery) {
+              throw new Error("session registration or token approval surface is unavailable");
             }
             if (!api) {
               throw new Error("Vara API is unavailable");
@@ -499,6 +911,7 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
             await ensureDevFunded(api, account.address);
 
             const signer = await getOrCreateSessionSigner(account.decodedAddress);
+            const voucherBundle = await ensureSponsoredAccess(signer.address);
             const currentBlock = Number((await api.query.system.number()).toString());
             const expiresAt = currentBlock + Math.max(1, VARA_SESSION_DURATION_BLOCKS);
             const permissions: VaraSessionPermissions = {
@@ -507,16 +920,33 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
               withdraw: true
             };
 
-            const tx = registerSession(signer.actorId, expiresAt, permissions)
-              .withAccount(account.address, { signer: account.signer });
+            const tx = registerSession(signer.actorId, expiresAt, permissions);
+            await applyOwnerContext(tx, voucherBundle);
             await tx.calculateGas();
             const result = await tx.signAndSend();
             await result.response();
 
-            const sessionFunding = parseVar(VARA_SESSION_FUNDING_AMOUNT);
-            if (sessionFunding > 0n && api.tx.balances?.transferKeepAlive) {
-              const accountData = await api.query.system.account(signer.address);
-              const currentFree = BigInt(accountData.data.free.toString());
+            await ensureAllowance(
+              allowanceQuery,
+              approve,
+              VARA_MARGIN_VAULT_PROGRAM_ID,
+              MAX_U128 / 2n,
+              voucherBundle
+            );
+            await ensureAllowance(
+              allowanceQuery,
+              approve,
+              VARA_LIQUIDITY_POOL_PROGRAM_ID,
+              MAX_U128 / 2n,
+              voucherBundle
+            );
+
+            const configuredSessionFunding = parseVar(VARA_SESSION_FUNDING_AMOUNT);
+            const sessionFunding = configuredSessionFunding > 0n
+              ? configuredSessionFunding
+              : SESSION_GAS_FUNDING_FALLBACK;
+            if (api.tx.balances?.transferKeepAlive && !voucherBundle.session?.voucherId) {
+              const currentFree = await readNativeBalance(api, signer.address);
               if (currentFree < sessionFunding) {
                 await api.tx.balances
                   .transferKeepAlive(signer.address, sessionFunding)
@@ -548,12 +978,13 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
             throw new Error("revoke session function is unavailable");
           }
 
-          const tx = revokeSession(onchainSession.sessionKey)
-            .withAccount(account.address, { signer: account.signer });
+          const tx = revokeSession(onchainSession.sessionKey);
+          await applyOwnerContext(tx);
           await tx.calculateGas();
           const result = await tx.signAndSend();
           await result.response();
           clearSessionSigner(account.decodedAddress);
+          setSponsoredVouchers((current) => ({ owner: current.owner, session: null }));
         });
       },
       async deposit(amount: number) {
@@ -577,28 +1008,34 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           }
 
           const approve = tokenService.functions.Approve;
+          const allowanceQuery = tokenService.queries.Allowance;
+          const balanceOfQuery = tokenService.queries.BalanceOf;
           const deposit = vaultService.functions.Deposit;
-          if (!approve || !deposit) {
-            throw new Error("token approve or vault deposit function is unavailable");
+          if (!approve || !deposit || !allowanceQuery || !balanceOfQuery) {
+            throw new Error("token approve/deposit queries are unavailable");
           }
 
           const amountUnits = decimalToBigInt(amount, 6);
-          const approveTx = approve(VARA_MARGIN_VAULT_PROGRAM_ID, amountUnits)
-            .withAccount(account.address, { signer: account.signer });
-          await approveTx.calculateGas();
-          await (await approveTx.signAndSend()).response();
+          const walletBalance = toBigInt(
+            await runSailsQuery<bigint>(balanceOfQuery, account.decodedAddress, account.decodedAddress)
+          );
+          if (walletBalance < amountUnits) {
+            throw new Error(
+              `Wallet balance is only ${formatUnits(walletBalance, 6)} tUSDC, but deposit needs ${formatUnits(amountUnits, 6)} tUSDC. Mint or reduce the amount first.`
+            );
+          }
+
+          const voucherBundle = await ensureSponsoredAccess(signlessModeEnabled ? localSessionSigner?.address ?? null : null);
+          await ensureAllowance(
+            allowanceQuery,
+            approve,
+            VARA_MARGIN_VAULT_PROGRAM_ID,
+            amountUnits,
+            voucherBundle
+          );
 
           const tx = deposit(amountUnits);
-          if (hasSessionSigner) {
-            await ensureSessionSignerFunded(api, account.decodedAddress);
-            const signer = await loadSessionSigner(account.decodedAddress);
-            if (!signer) {
-              throw new Error("local session signer is unavailable");
-            }
-            tx.withAccount(signer.pair);
-          } else {
-            tx.withAccount(account.address, { signer: account.signer });
-          }
+          await applySessionOrOwnerContext(tx, voucherBundle);
           await tx.calculateGas();
           await (await tx.signAndSend()).response();
         });
@@ -627,8 +1064,8 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
             throw new Error("mint function is unavailable");
           }
 
-          const tx = mint(decimalToBigInt(amount, 6))
-            .withAccount(account.address, { signer: account.signer });
+          const tx = mint(decimalToBigInt(amount, 6));
+          await applyOwnerContext(tx);
           await tx.calculateGas();
           await (await tx.signAndSend()).response();
         });
@@ -654,19 +1091,34 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           }
 
           const approve = tokenService.functions.Approve;
+          const allowanceQuery = tokenService.queries.Allowance;
+          const balanceOfQuery = tokenService.queries.BalanceOf;
           const depositLiquidity = poolService.functions.DepositLiquidity;
-          if (!approve || !depositLiquidity) {
-            throw new Error("token approve or pool deposit function is unavailable");
+          if (!approve || !depositLiquidity || !allowanceQuery || !balanceOfQuery) {
+            throw new Error("token approve or pool deposit queries are unavailable");
           }
 
           const amountUnits = decimalToBigInt(amount, 6);
-          const approveTx = approve(VARA_LIQUIDITY_POOL_PROGRAM_ID, amountUnits)
-            .withAccount(account.address, { signer: account.signer });
-          await approveTx.calculateGas();
-          await (await approveTx.signAndSend()).response();
+          const walletBalance = toBigInt(
+            await runSailsQuery<bigint>(balanceOfQuery, account.decodedAddress, account.decodedAddress)
+          );
+          if (walletBalance < amountUnits) {
+            throw new Error(
+              `Wallet balance is only ${formatUnits(walletBalance, 6)} tUSDC, but LP funding needs ${formatUnits(amountUnits, 6)} tUSDC. Mint or reduce the amount first.`
+            );
+          }
 
-          const tx = depositLiquidity(amountUnits)
-            .withAccount(account.address, { signer: account.signer });
+          const voucherBundle = await ensureSponsoredAccess(signlessModeEnabled ? localSessionSigner?.address ?? null : null);
+          await ensureAllowance(
+            allowanceQuery,
+            approve,
+            VARA_LIQUIDITY_POOL_PROGRAM_ID,
+            amountUnits,
+            voucherBundle
+          );
+
+          const tx = depositLiquidity(amountUnits);
+          await applyOwnerContext(tx, voucherBundle);
           await tx.calculateGas();
           await (await tx.signAndSend()).response();
         });
@@ -696,16 +1148,7 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           }
 
           const tx = withdraw(decimalToBigInt(amount, 6));
-          if (hasSessionSigner) {
-            await ensureSessionSignerFunded(api, account.decodedAddress);
-            const signer = await loadSessionSigner(account.decodedAddress);
-            if (!signer) {
-              throw new Error("local session signer is unavailable");
-            }
-            tx.withAccount(signer.pair);
-          } else {
-            tx.withAccount(account.address, { signer: account.signer });
-          }
+          await applySessionOrOwnerContext(tx);
           await tx.calculateGas();
           await (await tx.signAndSend()).response();
         });
@@ -730,18 +1173,21 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           }
 
           const notional = decimalToBigInt(input.notional, 6);
-          const referencePrice = liveReferencePrice ?? Number(onchainMarket.markPrice);
-          if (isLocalNode && referencePrice > 0) {
-            await syncMarketPrice(referencePrice, false);
+          const livePrice = liveReferencePrice ?? Number(onchainMarket.markPrice);
+          if (isLocalNode && livePrice > 0) {
+            await syncMarketPrice(livePrice, false);
           }
-          const markPrice = decimalToBigInt(referencePrice, 8);
+          const executionPrice = Number(onchainMarket.markPrice);
+          const markPrice = decimalToBigInt(executionPrice, 8);
           if (markPrice === 0n) {
             throw new Error("market price is unavailable");
           }
 
           const size = (notional * SIZE_FROM_NOTIONAL_SCALE) / markPrice;
           const actualNotional = (size * markPrice) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE;
-          const margin = divCeil(actualNotional, BigInt(input.leverage)) + 1n;
+          const margin = divCeil(actualNotional, BigInt(input.leverage)) + 10_000n;
+          const displayEntryPrice = livePrice > 0 ? livePrice : executionPrice;
+          const displayEntryUnits = decimalToBigInt(displayEntryPrice, 8);
           const side = input.side === "long" ? "Long" : "Short";
           const openPosition = marketService.functions.OpenPosition;
           if (!openPosition) {
@@ -749,37 +1195,81 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
           }
 
           const tx = openPosition(side, size, input.leverage, margin, input.maxSlippageBps);
-          if (hasSessionSigner) {
-            await ensureSessionSignerFunded(api, account.decodedAddress);
-            const signer = await loadSessionSigner(account.decodedAddress);
-            if (!signer) {
-              throw new Error("local session signer is unavailable");
+          await applySessionOrOwnerContext(tx);
+          tx.withGas(isLocalNode ? "max" : TRADE_GAS_LIMIT);
+          const result = await tx.signAndSend();
+          await waitForTransactionResponse(result, "Trade transaction");
+
+          const positionsQuery = marketService.queries.Positions;
+          if (positionsQuery && executionPrice > 0) {
+            const latestPositions = await readPositionsForTraders(
+              positionsQuery,
+              walletAddress,
+              [walletAddress, localSessionSigner?.actorId]
+            );
+            latestPositions
+              .forEach((position) => {
+                const positionId = Number(toBigInt(position.id));
+                const latestSize = toBigInt(position.position.size);
+                const previous = onchainPositions.find((item) => item.asset === asset && item.id === positionId) ?? null;
+                const previousEntryUnits = previous
+                  ? decimalToBigInt(Number(previous.entryPrice), 8)
+                  : null;
+                const previousSize = previous
+                  ? decimalToBigInt(Number(previous.size), 8)
+                  : 0n;
+                const isSameSideAdd = previous && previous.side === input.side && previousSize > 0n;
+                const isStillPreviousSide = previous && (
+                  (previous.side === "long" && latestSize > 0n) ||
+                  (previous.side === "short" && latestSize < 0n)
+                );
+                const overrideEntry = isSameSideAdd && previousEntryUnits
+                  ? ((previousSize * previousEntryUnits) + (size * displayEntryUnits)) / (previousSize + size)
+                  : isStillPreviousSide && previousEntryUnits
+                    ? previousEntryUnits
+                    : displayEntryUnits;
+                writePositionDisplayOverride(
+                  account.decodedAddress,
+                  asset,
+                  positionId,
+                  formatUnits(overrideEntry, 8)
+                );
+              });
+            const marketStateQuery = marketService.queries.MarketState;
+            const latestMarket = marketStateQuery
+              ? await runSailsQuery<VaraMarketSnapshot>(marketStateQuery, walletAddress)
+              : null;
+            if (latestMarket) {
+              setOnchainMarket(parseMarket(asset, latestMarket));
+              setOnchainPositions(
+                latestPositions.map((position) => {
+                  const positionId = Number(toBigInt(position.id));
+                  return parsePosition(
+                    asset,
+                    latestMarket,
+                    position,
+                    readDisplayEntryOverride(account.decodedAddress, asset, positionId)
+                  );
+                })
+              );
             }
-            tx.withAccount(signer.pair);
-          } else {
-            tx.withAccount(account.address, { signer: account.signer });
           }
-          // Trade methods schedule delayed self-messages for liquidation/funding,
-          // which can trip Gear's dry-run "forbidden function" guard during gas estimation.
-          // Use block max gas in local dev to avoid false-negative calculateGas failures.
-          tx.withGas("max");
-          await (await tx.signAndSend()).response();
         });
       },
-      async closePosition(closeAsset: Asset) {
+      async closePosition(positionToClose: PositionSnapshot) {
         if (mode === "demo") {
           if (!sessionToken) {
             throw new Error("start a session first");
           }
-          return post<{ snapshot: EngineSnapshot }>("/api/orders/close", { sessionToken, asset: closeAsset });
+          return post<{ snapshot: EngineSnapshot }>("/api/orders/close", { sessionToken, asset: positionToClose.asset });
         }
 
         await runAction("Trade", "Closing position...", "Position closed.", async () => {
-          if (closeAsset !== asset) {
-            throw new Error(`Switch to the ${closeAsset} market tab before closing this position`);
+          if (positionToClose.asset !== asset) {
+            throw new Error(`Switch to the ${positionToClose.asset} market tab before closing this position`);
           }
 
-          if (!isVaraReady || !marketSails.data || !account || !onchainPosition) {
+          if (!isVaraReady || !marketSails.data || !account) {
             throw new Error("wallet or position is not ready");
           }
           await ensureDevFunded(api, account.address);
@@ -792,28 +1282,21 @@ export function useVaraProgram(asset: Asset, mode: RuntimeMode, sessionToken: st
             throw new Error("market service is unavailable");
           }
 
-          const closeSize = decimalToBigInt(Number(onchainPosition.size), 8);
+          const closeSize = decimalToBigInt(Number(positionToClose.size), 8);
           const closePosition = marketService.functions.ClosePosition;
           if (!closePosition) {
             throw new Error("close position function is unavailable");
           }
 
-          const tx = closePosition(closeSize);
-          if (hasSessionSigner) {
-            await ensureSessionSignerFunded(api, account.decodedAddress);
-            const signer = await loadSessionSigner(account.decodedAddress);
-            if (!signer) {
-              throw new Error("local session signer is unavailable");
-            }
-            tx.withAccount(signer.pair);
-          } else {
-            tx.withAccount(account.address, { signer: account.signer });
-          }
-          tx.withGas("max");
-          await (await tx.signAndSend()).response();
+          const tx = closePosition(positionToClose.id, closeSize);
+          await applySessionOrOwnerContext(tx);
+          tx.withGas(isLocalNode ? "max" : TRADE_GAS_LIMIT);
+          const result = await tx.signAndSend();
+          await waitForTransactionResponse(result, "Close transaction");
+          deletePositionDisplayOverride(account.decodedAddress, asset, positionToClose.id);
         });
       }
     }),
-    [account, api, asset, hasSessionSigner, isApiReady, isVaraReady, liveReferencePrice, localSessionSigner, marketSails.data, mode, onchainAccount, onchainMarket, onchainPool, onchainPosition, onchainSession, poolSails.data, runAction, sessionRegistrySails.data, sessionToken, syncMarketPrice, tokenSails.data, vaultSails.data]
+    [account, actionPending, api, applyOwnerContext, applySessionOrOwnerContext, asset, ensureAllowance, ensureSponsoredAccess, hasSessionSigner, isApiReady, isVaraReady, liveReferencePrice, localSessionSigner, marketSails.data, mode, onchainAccount, onchainMarket, onchainPool, onchainPositions, onchainSession, poolSails.data, preferSignless, runAction, sessionRegistrySails.data, sessionToken, signlessModeEnabled, sponsorModeEnabled, sponsoredVouchers.owner, sponsoredVouchers.session, syncMarketPrice, tokenSails.data, vaultSails.data]
   );
 }
