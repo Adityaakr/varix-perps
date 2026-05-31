@@ -10,5 +10,9 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["sails-rs/ethexe"]
+
 [dependencies]
 sails-rs.workspace = true

@@ -1,5 +1,5 @@
 constructor {
-  Create : (owner: actor_id, name: str, symbol: str, decimals: u8);
+  Create : (owner: actor_id);
 };
 
 service Token {
@@ -10,26 +10,6 @@ service Token {
   TransferFrom : (from: actor_id, to: actor_id, value: u128) -> bool;
   query Allowance : (owner: actor_id, spender: actor_id) -> u128;
   query BalanceOf : (owner: actor_id) -> u128;
-  query Decimals : () -> u8;
-  query Name : () -> str;
-  query Symbol : () -> str;
+  query Decimals : () -> u16;
   query TotalSupply : () -> u128;
-
-  events {
-    Transfer: struct {
-      from: actor_id,
-      to: actor_id,
-      value: u128,
-    };
-    Approval: struct {
-      owner: actor_id,
-      spender: actor_id,
-      value: u128,
-    };
-    Minted: struct {
-      to: actor_id,
-      value: u128,
-    };
-  }
 };
-

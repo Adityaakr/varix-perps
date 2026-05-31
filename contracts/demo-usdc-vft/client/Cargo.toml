@@ -10,9 +10,13 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["demo-usdc-vft-app/ethexe", "sails-rs/ethexe"]
+
 [dependencies]
 sails-rs.workspace = true
 
 [build-dependencies]
-demo-usdc-vft-app.workspace = true
+demo-usdc-vft-app = { workspace = true, default-features = false }
 sails-rs = { workspace = true, features = ["build"] }

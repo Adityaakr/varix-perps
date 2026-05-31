@@ -20,9 +20,6 @@ pub trait DemoUsdcVftClientCtors {
     fn create(
         self,
         owner: ActorId,
-        name: String,
-        symbol: String,
-        decimals: u8,
     ) -> sails_rs::client::PendingCtor<DemoUsdcVftClientProgram, io::Create, Self::Env>;
 }
 impl<E: sails_rs::client::GearEnv> DemoUsdcVftClientCtors
@@ -32,17 +29,14 @@ impl<E: sails_rs::client::GearEnv> DemoUsdcVftClientCtors
     fn create(
         self,
         owner: ActorId,
-        name: String,
-        symbol: String,
-        decimals: u8,
     ) -> sails_rs::client::PendingCtor<DemoUsdcVftClientProgram, io::Create, Self::Env> {
-        self.pending_ctor((owner, name, symbol, decimals))
+        self.pending_ctor((owner,))
     }
 }
 
 pub mod io {
     use super::*;
-    sails_rs::io_struct_impl!(Create (owner: ActorId, name: String, symbol: String, decimals: u8) -> ());
+    sails_rs::io_struct_impl!(Create (owner: ActorId) -> ());
 }
 
 pub mod token {
@@ -81,8 +75,6 @@ pub mod token {
             owner: ActorId,
         ) -> sails_rs::client::PendingCall<io::BalanceOf, Self::Env>;
         fn decimals(&self) -> sails_rs::client::PendingCall<io::Decimals, Self::Env>;
-        fn name(&self) -> sails_rs::client::PendingCall<io::Name, Self::Env>;
-        fn symbol(&self) -> sails_rs::client::PendingCall<io::Symbol, Self::Env>;
         fn total_supply(&self) -> sails_rs::client::PendingCall<io::TotalSupply, Self::Env>;
     }
     pub struct TokenImpl;
@@ -136,12 +128,6 @@ pub mod token {
         fn decimals(&self) -> sails_rs::client::PendingCall<io::Decimals, Self::Env> {
             self.pending_call(())
         }
-        fn name(&self) -> sails_rs::client::PendingCall<io::Name, Self::Env> {
-            self.pending_call(())
-        }
-        fn symbol(&self) -> sails_rs::client::PendingCall<io::Symbol, Self::Env> {
-            self.pending_call(())
-        }
         fn total_supply(&self) -> sails_rs::client::PendingCall<io::TotalSupply, Self::Env> {
             self.pending_call(())
         }
@@ -156,38 +142,7 @@ pub mod token {
         sails_rs::io_struct_impl!(TransferFrom (from: ActorId, to: ActorId, value: u128) -> bool);
         sails_rs::io_struct_impl!(Allowance (owner: ActorId, spender: ActorId) -> u128);
         sails_rs::io_struct_impl!(BalanceOf (owner: ActorId) -> u128);
-        sails_rs::io_struct_impl!(Decimals () -> u8);
-        sails_rs::io_struct_impl!(Name () -> String);
-        sails_rs::io_struct_impl!(Symbol () -> String);
+        sails_rs::io_struct_impl!(Decimals () -> u16);
         sails_rs::io_struct_impl!(TotalSupply () -> u128);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub mod events {
-        use super::*;
-        #[derive(PartialEq, Debug, Encode, Decode)]
-        #[codec(crate = sails_rs::scale_codec)]
-        pub enum TokenEvents {
-            Transfer {
-                from: ActorId,
-                to: ActorId,
-                value: u128,
-            },
-            Approval {
-                owner: ActorId,
-                spender: ActorId,
-                value: u128,
-            },
-            Minted {
-                to: ActorId,
-                value: u128,
-            },
-        }
-        impl sails_rs::client::Event for TokenEvents {
-            const EVENT_NAMES: &'static [Route] = &["Transfer", "Approval", "Minted"];
-        }
-        impl sails_rs::client::ServiceWithEvents for TokenImpl {
-            type Event = TokenEvents;
-        }
     }
 }

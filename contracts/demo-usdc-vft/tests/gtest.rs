@@ -21,7 +21,7 @@ async fn demo_vft_mints_transfers_and_uses_allowances() {
     let owner_env = GtestEnv::new(system, OWNER.into());
     let program = owner_env
         .deploy::<DemoUsdcVftClientProgram>(code_id, b"demo-usdc".to_vec())
-        .create(OWNER.into(), "Demo USDC".into(), "dUSDC".into(), 6)
+        .create(OWNER.into())
         .await
         .unwrap();
 
@@ -48,5 +48,5 @@ async fn demo_vft_mints_transfers_and_uses_allowances() {
     let mut owner_token = program.token();
     owner_token.mint_to(BOB.into(), 500_000).await.unwrap();
     assert_eq!(program.token().total_supply().await.unwrap(), 5_500_000);
-    assert_eq!(bob.token().symbol().await.unwrap(), "dUSDC");
+    assert_eq!(bob.token().decimals().await.unwrap(), 6);
 }

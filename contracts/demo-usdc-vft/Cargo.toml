@@ -10,6 +10,10 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["demo-usdc-vft-app/ethexe", "sails-rs/ethexe"]
+
 [dependencies]
 demo-usdc-vft-app.workspace = true
 sails-rs.workspace = true
@@ -39,7 +43,7 @@ keywords = ["vara", "gear", "sails", "vft", "wasm"]
 categories = ["cryptography::cryptocurrencies", "no-std", "wasm"]
 
 [workspace.dependencies]
-demo-usdc-vft-app = { version = "0.1.0", path = "app" }
+demo-usdc-vft-app = { version = "0.1.0", path = "app", default-features = false }
 demo-usdc-vft-client = { version = "0.1.0", path = "client" }
 sails-rs = "0.10.3"
 tokio = "1.48.0"
