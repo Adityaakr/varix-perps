@@ -30,7 +30,7 @@ async fn vault_handles_deposit_withdraw_and_lock_flow() {
     let owner_env = GtestEnv::new(system, OWNER.into());
     let token = owner_env
         .deploy::<DemoUsdcVftClientProgram>(token_code_id, b"token".to_vec())
-        .create(OWNER.into(), "Demo USDC".into(), "dUSDC".into(), 6)
+        .create(OWNER.into())
         .await
         .unwrap();
     let session_registry = owner_env
@@ -40,7 +40,7 @@ async fn vault_handles_deposit_withdraw_and_lock_flow() {
         .unwrap();
     let program = owner_env
         .deploy::<MarginVaultClientProgram>(code_id, b"vault".to_vec())
-        .create(OWNER.into(), Some(session_registry.id()), Some(token.id()))
+        .create(OWNER.into(), session_registry.id(), token.id())
         .await
         .unwrap();
 

@@ -9,7 +9,7 @@ type VaultTotals = struct {
 };
 
 constructor {
-  Create : (owner: actor_id, session_registry: opt actor_id, token_program: opt actor_id);
+  Create : (owner: actor_id, session_registry: actor_id, token_program: actor_id);
 };
 
 service Vault {
@@ -18,52 +18,10 @@ service Vault {
   LockMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
   ReleaseMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
   RevokeMarket : (market: actor_id) -> null;
-  SettlePosition : (trader: actor_id, released_margin: u128, payout: u128, pool: opt actor_id) -> AccountSnapshot;
-  SlashForLiquidation : (trader: actor_id, amount: u128, pool: opt actor_id) -> AccountSnapshot;
+  SettlePosition : (trader: actor_id, released_margin: u128, payout: u128, pool: actor_id) -> AccountSnapshot;
+  SlashForLiquidation : (trader: actor_id, amount: u128, pool: actor_id) -> AccountSnapshot;
   Withdraw : (amount: u128) -> AccountSnapshot;
   query Account : (trader: actor_id) -> AccountSnapshot;
   query Totals : () -> VaultTotals;
-
-  events {
-    Deposited: struct {
-      trader: actor_id,
-      amount: u128,
-      free_balance: u128,
-    };
-    Withdrawn: struct {
-      trader: actor_id,
-      amount: u128,
-      free_balance: u128,
-    };
-    PositionSettled: struct {
-      market: actor_id,
-      trader: actor_id,
-      released_margin: u128,
-      payout: u128,
-      account: AccountSnapshot,
-    };
-    MarginLocked: struct {
-      market: actor_id,
-      trader: actor_id,
-      amount: u128,
-      account: AccountSnapshot,
-    };
-    MarginReleased: struct {
-      market: actor_id,
-      trader: actor_id,
-      amount: u128,
-      account: AccountSnapshot,
-    };
-    MarginSlashed: struct {
-      market: actor_id,
-      trader: actor_id,
-      amount: u128,
-      account: AccountSnapshot,
-    };
-    MarketAuthorizationChanged: struct {
-      market: actor_id,
-      enabled: bool,
-    };
-  }
 };
 

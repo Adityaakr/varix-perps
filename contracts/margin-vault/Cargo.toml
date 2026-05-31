@@ -10,6 +10,11 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["sessions"]
+ethexe = ["margin-vault-app/ethexe", "sails-rs/ethexe"]
+sessions = ["margin-vault-app/sessions"]
+
 [dependencies]
 margin-vault-app.workspace = true
 sails-rs.workspace = true
@@ -45,7 +50,7 @@ categories = ["cryptography::cryptocurrencies", "no-std", "wasm"]
 [workspace.dependencies]
 demo-usdc-vft = { version = "0.1.0", path = "../demo-usdc-vft" }
 demo-usdc-vft-client = { version = "0.1.0", path = "../demo-usdc-vft/client" }
-margin-vault-app = { version = "0.1.0", path = "app" }
+margin-vault-app = { version = "0.1.0", path = "app", default-features = false }
 margin-vault-client = { version = "0.1.0", path = "client" }
 sails-rs = "0.10.3"
 session-registry = { version = "0.1.0", path = "../session-registry" }

@@ -5,6 +5,8 @@ use demo_usdc_vft_client::{
     DemoUsdcVftClient,
     DemoUsdcVftClientProgram,
 };
+#[cfg(feature = "ethexe")]
+use alloy_sol_types::{SolType, SolValue, private::SolTypeValue};
 use sails_rs::{
     cell::RefCell,
     client::Program as _,
@@ -12,6 +14,7 @@ use sails_rs::{
     gstd::{exec, msg},
     prelude::*,
 };
+#[cfg(feature = "sessions")]
 use session_registry_client::{
     session_registry::SessionRegistry as SessionRegistryCalls,
     SessionAction as SessionRegistryAction,
@@ -35,58 +38,12 @@ pub enum VaultError {
     MissingTokenProgram,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
 #[scale_info(crate = sails_rs::scale_info)]
 pub struct VaultTotals {
     pub total_free: u128,
     pub total_locked: u128,
-}
-
-#[sails_rs::event]
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
-#[codec(crate = sails_rs::scale_codec)]
-#[scale_info(crate = sails_rs::scale_info)]
-pub enum VaultEvent {
-    Deposited {
-        trader: ActorId,
-        amount: u128,
-        free_balance: u128,
-    },
-    Withdrawn {
-        trader: ActorId,
-        amount: u128,
-        free_balance: u128,
-    },
-    PositionSettled {
-        market: ActorId,
-        trader: ActorId,
-        released_margin: u128,
-        payout: u128,
-        account: AccountSnapshot,
-    },
-    MarginLocked {
-        market: ActorId,
-        trader: ActorId,
-        amount: u128,
-        account: AccountSnapshot,
-    },
-    MarginReleased {
-        market: ActorId,
-        trader: ActorId,
-        amount: u128,
-        account: AccountSnapshot,
-    },
-    MarginSlashed {
-        market: ActorId,
-        trader: ActorId,
-        amount: u128,
-        account: AccountSnapshot,
-    },
-    MarketAuthorizationChanged {
-        market: ActorId,
-        enabled: bool,
-    },
 }
 
 #[derive(Default)]
@@ -101,6 +58,23 @@ pub struct VaultState {
 
 pub struct VaultService<'a> {
     state: &'a RefCell<VaultState>,
+}
+
+enum TraderAction {
+    AddMargin,
+    Withdraw,
+}
+
+fn zero_actor_id() -> ActorId {
+    ActorId::from([0u8; 32])
+}
+
+fn optional_actor_id(actor: ActorId) -> Option<ActorId> {
+    if actor == zero_actor_id() {
+        None
+    } else {
+        Some(actor)
+    }
 }
 
 impl<'a> VaultService<'a> {
@@ -143,14 +117,17 @@ impl<'a> VaultService<'a> {
         }
     }
 
-    async fn resolve_trader(
-        &self,
-        action: SessionRegistryAction,
-    ) -> Result<ActorId, VaultError> {
+    #[cfg(feature = "sessions")]
+    async fn resolve_trader(&self, action: TraderAction) -> Result<ActorId, VaultError> {
         let caller = msg::source();
         let session_registry = self.state.borrow().session_registry;
         let Some(session_registry) = session_registry else {
             return Ok(caller);
+        };
+
+        let action = match action {
+            TraderAction::AddMargin => SessionRegistryAction::AddMargin,
+            TraderAction::Withdraw => SessionRegistryAction::Withdraw,
         };
 
         let session_registry = SessionRegistryClientProgram::client(session_registry);
@@ -173,15 +150,20 @@ impl<'a> VaultService<'a> {
             Err(VaultError::Unauthorized)
         }
     }
+
+    #[cfg(not(feature = "sessions"))]
+    async fn resolve_trader(&self, _action: TraderAction) -> Result<ActorId, VaultError> {
+        Ok(msg::source())
+    }
 }
 
-#[sails_rs::service(events = VaultEvent)]
+#[sails_rs::service]
 impl VaultService<'_> {
     #[export(unwrap_result)]
     pub async fn deposit(&mut self, amount: u128) -> Result<AccountSnapshot, VaultError> {
         VaultService::require_positive(amount)?;
 
-        let trader = self.resolve_trader(SessionRegistryAction::AddMargin).await?;
+        let trader = self.resolve_trader(TraderAction::AddMargin).await?;
         let token_program = self
             .state
             .borrow()
@@ -205,12 +187,6 @@ impl VaultService<'_> {
             free: *free,
             locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
         };
-        self.emit_event(VaultEvent::Deposited {
-            trader,
-            amount,
-            free_balance: snapshot.free,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -218,7 +194,7 @@ impl VaultService<'_> {
     pub async fn withdraw(&mut self, amount: u128) -> Result<AccountSnapshot, VaultError> {
         VaultService::require_positive(amount)?;
 
-        let trader = self.resolve_trader(SessionRegistryAction::Withdraw).await?;
+        let trader = self.resolve_trader(TraderAction::Withdraw).await?;
         let (snapshot, token_program) = {
             let mut state = self.state.borrow_mut();
             let free = state.free_balances.entry(trader).or_default();
@@ -246,17 +222,10 @@ impl VaultService<'_> {
             return Err(VaultError::TokenTransferFailed);
         }
 
-        self.emit_event(VaultEvent::Withdrawn {
-            trader,
-            amount,
-            free_balance: snapshot.free,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
-    #[export(unwrap_result)]
-    pub async fn settle_position(
+    async fn settle_position_inner(
         &mut self,
         trader: ActorId,
         released_margin: u128,
@@ -309,15 +278,19 @@ impl VaultService<'_> {
             }
         }
 
-        self.emit_event(VaultEvent::PositionSettled {
-            market: msg::source(),
-            trader,
-            released_margin,
-            payout,
-            account: snapshot,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub async fn settle_position(
+        &mut self,
+        trader: ActorId,
+        released_margin: u128,
+        payout: u128,
+        pool: ActorId,
+    ) -> Result<AccountSnapshot, VaultError> {
+        self.settle_position_inner(trader, released_margin, payout, optional_actor_id(pool))
+            .await
     }
 
     #[export(unwrap_result)]
@@ -327,11 +300,6 @@ impl VaultService<'_> {
         if state.authorized_markets.insert(market, true).is_some() {
             return Err(VaultError::MarketAlreadyAuthorized);
         }
-        self.emit_event(VaultEvent::MarketAuthorizationChanged {
-            market,
-            enabled: true,
-        })
-        .expect("event emission should succeed");
         Ok(())
     }
 
@@ -342,11 +310,6 @@ impl VaultService<'_> {
         if state.authorized_markets.remove(&market).is_none() {
             return Err(VaultError::MarketNotAuthorized);
         }
-        self.emit_event(VaultEvent::MarketAuthorizationChanged {
-            market,
-            enabled: false,
-        })
-        .expect("event emission should succeed");
         Ok(())
     }
 
@@ -380,13 +343,6 @@ impl VaultService<'_> {
             locked: locked_balance,
         };
 
-        self.emit_event(VaultEvent::MarginLocked {
-            market: msg::source(),
-            trader,
-            amount,
-            account: snapshot,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
@@ -420,18 +376,10 @@ impl VaultService<'_> {
             locked: locked_balance,
         };
 
-        self.emit_event(VaultEvent::MarginReleased {
-            market: msg::source(),
-            trader,
-            amount,
-            account: snapshot,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
     }
 
-    #[export(unwrap_result)]
-    pub async fn slash_for_liquidation(
+    async fn slash_for_liquidation_inner(
         &mut self,
         trader: ActorId,
         amount: u128,
@@ -472,14 +420,18 @@ impl VaultService<'_> {
             return Err(VaultError::TokenTransferFailed);
         }
 
-        self.emit_event(VaultEvent::MarginSlashed {
-            market: msg::source(),
-            trader,
-            amount,
-            account: snapshot,
-        })
-        .expect("event emission should succeed");
         Ok(snapshot)
+    }
+
+    #[export(unwrap_result)]
+    pub async fn slash_for_liquidation(
+        &mut self,
+        trader: ActorId,
+        amount: u128,
+        pool: ActorId,
+    ) -> Result<AccountSnapshot, VaultError> {
+        self.slash_for_liquidation_inner(trader, amount, optional_actor_id(pool))
+            .await
     }
 
     #[export]
@@ -507,16 +459,12 @@ pub struct Program {
 
 #[sails_rs::program]
 impl Program {
-    pub fn create(
-        owner: ActorId,
-        session_registry: Option<ActorId>,
-        token_program: Option<ActorId>,
-    ) -> Self {
+    pub fn create(owner: ActorId, session_registry: ActorId, token_program: ActorId) -> Self {
         Self {
             state: RefCell::new(VaultState {
                 owner,
-                session_registry,
-                token_program,
+                session_registry: optional_actor_id(session_registry),
+                token_program: optional_actor_id(token_program),
                 ..Default::default()
             }),
         }
@@ -524,5 +472,56 @@ impl Program {
 
     pub fn vault(&self) -> VaultService<'_> {
         VaultService::new(&self.state)
+    }
+}
+
+#[cfg(feature = "ethexe")]
+alloy_sol_types::sol! {
+    struct VaultTotalsSol {
+        uint128 total_free;
+        uint128 total_locked;
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<VaultTotalsSol> for VaultTotals {
+    fn from(value: VaultTotalsSol) -> Self {
+        Self {
+            total_free: value.total_free,
+            total_locked: value.total_locked,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl From<VaultTotals> for VaultTotalsSol {
+    fn from(value: VaultTotals) -> Self {
+        Self {
+            total_free: value.total_free,
+            total_locked: value.total_locked,
+        }
+    }
+}
+
+#[cfg(feature = "ethexe")]
+impl SolValue for VaultTotals {
+    type SolType = VaultTotalsSol;
+}
+
+#[cfg(feature = "ethexe")]
+impl SolTypeValue<VaultTotalsSol> for VaultTotals {
+    fn stv_to_tokens(&self) -> <VaultTotalsSol as SolType>::Token<'_> {
+        let value: VaultTotalsSol = (*self).into();
+        <VaultTotalsSol as SolTypeValue<VaultTotalsSol>>::stv_to_tokens(&value)
+    }
+
+    fn stv_abi_encode_packed_to(&self, out: &mut sails_rs::Vec<u8>) {
+        let value: VaultTotalsSol = (*self).into();
+        <VaultTotalsSol as SolTypeValue<VaultTotalsSol>>::stv_abi_encode_packed_to(&value, out);
+    }
+
+    fn stv_eip712_data_word(&self) -> sails_rs::alloy_sol_types::Word {
+        let value: VaultTotalsSol = (*self).into();
+        <VaultTotalsSol as SolTypeValue<VaultTotalsSol>>::stv_eip712_data_word(&value)
     }
 }

@@ -10,9 +10,13 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+ethexe = ["margin-vault-app/ethexe", "sails-rs/ethexe"]
+
 [dependencies]
 sails-rs.workspace = true
 
 [build-dependencies]
-margin-vault-app.workspace = true
+margin-vault-app = { workspace = true, default-features = false }
 sails-rs = { workspace = true, features = ["build"] }

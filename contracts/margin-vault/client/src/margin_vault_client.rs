@@ -20,8 +20,8 @@ pub trait MarginVaultClientCtors {
     fn create(
         self,
         owner: ActorId,
-        session_registry: Option<ActorId>,
-        token_program: Option<ActorId>,
+        session_registry: ActorId,
+        token_program: ActorId,
     ) -> sails_rs::client::PendingCtor<MarginVaultClientProgram, io::Create, Self::Env>;
 }
 impl<E: sails_rs::client::GearEnv> MarginVaultClientCtors
@@ -31,8 +31,8 @@ impl<E: sails_rs::client::GearEnv> MarginVaultClientCtors
     fn create(
         self,
         owner: ActorId,
-        session_registry: Option<ActorId>,
-        token_program: Option<ActorId>,
+        session_registry: ActorId,
+        token_program: ActorId,
     ) -> sails_rs::client::PendingCtor<MarginVaultClientProgram, io::Create, Self::Env> {
         self.pending_ctor((owner, session_registry, token_program))
     }
@@ -40,7 +40,7 @@ impl<E: sails_rs::client::GearEnv> MarginVaultClientCtors
 
 pub mod io {
     use super::*;
-    sails_rs::io_struct_impl!(Create (owner: ActorId, session_registry: Option<ActorId>, token_program: Option<ActorId>) -> ());
+    sails_rs::io_struct_impl!(Create (owner: ActorId, session_registry: ActorId, token_program: ActorId) -> ());
 }
 
 pub mod vault {
@@ -74,13 +74,13 @@ pub mod vault {
             trader: ActorId,
             released_margin: u128,
             payout: u128,
-            pool: Option<ActorId>,
+            pool: ActorId,
         ) -> sails_rs::client::PendingCall<io::SettlePosition, Self::Env>;
         fn slash_for_liquidation(
             &mut self,
             trader: ActorId,
             amount: u128,
-            pool: Option<ActorId>,
+            pool: ActorId,
         ) -> sails_rs::client::PendingCall<io::SlashForLiquidation, Self::Env>;
         fn withdraw(
             &mut self,
@@ -130,7 +130,7 @@ pub mod vault {
             trader: ActorId,
             released_margin: u128,
             payout: u128,
-            pool: Option<ActorId>,
+            pool: ActorId,
         ) -> sails_rs::client::PendingCall<io::SettlePosition, Self::Env> {
             self.pending_call((trader, released_margin, payout, pool))
         }
@@ -138,7 +138,7 @@ pub mod vault {
             &mut self,
             trader: ActorId,
             amount: u128,
-            pool: Option<ActorId>,
+            pool: ActorId,
         ) -> sails_rs::client::PendingCall<io::SlashForLiquidation, Self::Env> {
             self.pending_call((trader, amount, pool))
         }
@@ -166,73 +166,11 @@ pub mod vault {
         sails_rs::io_struct_impl!(LockMargin (trader: ActorId, amount: u128) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(ReleaseMargin (trader: ActorId, amount: u128) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(RevokeMarket (market: ActorId) -> ());
-        sails_rs::io_struct_impl!(SettlePosition (trader: ActorId, released_margin: u128, payout: u128, pool: Option<ActorId>) -> super::AccountSnapshot);
-        sails_rs::io_struct_impl!(SlashForLiquidation (trader: ActorId, amount: u128, pool: Option<ActorId>) -> super::AccountSnapshot);
+        sails_rs::io_struct_impl!(SettlePosition (trader: ActorId, released_margin: u128, payout: u128, pool: ActorId) -> super::AccountSnapshot);
+        sails_rs::io_struct_impl!(SlashForLiquidation (trader: ActorId, amount: u128, pool: ActorId) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(Withdraw (amount: u128) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(Account (trader: ActorId) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(Totals () -> super::VaultTotals);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub mod events {
-        use super::*;
-        #[derive(PartialEq, Debug, Encode, Decode)]
-        #[codec(crate = sails_rs::scale_codec)]
-        pub enum VaultEvents {
-            Deposited {
-                trader: ActorId,
-                amount: u128,
-                free_balance: u128,
-            },
-            Withdrawn {
-                trader: ActorId,
-                amount: u128,
-                free_balance: u128,
-            },
-            PositionSettled {
-                market: ActorId,
-                trader: ActorId,
-                released_margin: u128,
-                payout: u128,
-                account: AccountSnapshot,
-            },
-            MarginLocked {
-                market: ActorId,
-                trader: ActorId,
-                amount: u128,
-                account: AccountSnapshot,
-            },
-            MarginReleased {
-                market: ActorId,
-                trader: ActorId,
-                amount: u128,
-                account: AccountSnapshot,
-            },
-            MarginSlashed {
-                market: ActorId,
-                trader: ActorId,
-                amount: u128,
-                account: AccountSnapshot,
-            },
-            MarketAuthorizationChanged {
-                market: ActorId,
-                enabled: bool,
-            },
-        }
-        impl sails_rs::client::Event for VaultEvents {
-            const EVENT_NAMES: &'static [Route] = &[
-                "Deposited",
-                "Withdrawn",
-                "PositionSettled",
-                "MarginLocked",
-                "MarginReleased",
-                "MarginSlashed",
-                "MarketAuthorizationChanged",
-            ];
-        }
-        impl sails_rs::client::ServiceWithEvents for VaultImpl {
-            type Event = VaultEvents;
-        }
     }
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
