@@ -6,7 +6,7 @@ type OrderFormProps = {
   asset: MarketSnapshot["asset"];
   availableCollateral: number;
   availableNotional: number;
-  currentPosition: PositionSnapshot | null;
+  openPositions: PositionSnapshot[];
   disabledReason: string | null;
   market: MarketSnapshot | null;
   onSubmit: (input: {
@@ -21,7 +21,7 @@ export function OrderForm({
   asset,
   availableCollateral,
   availableNotional,
-  currentPosition,
+  openPositions,
   disabledReason,
   market,
   onSubmit
@@ -32,9 +32,34 @@ export function OrderForm({
   const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  const hasExistingPosition = Boolean(currentPosition);
-  const estimatedMargin = leverage > 0 ? notional / leverage : 0;
+  const netPosition = openPositions.find((position) => position.asset === asset) ?? null;
+  const netPositionNotional = netPosition ? Number(netPosition.notional) : 0;
+  const netPositionMargin = netPosition ? Number(netPosition.margin) : 0;
+  const isOppositeSideOrder = Boolean(netPosition && netPosition.side !== side);
+  const reducedNotional = isOppositeSideOrder ? Math.min(notional, netPositionNotional) : 0;
+  const incrementalNotional = isOppositeSideOrder
+    ? Math.max(0, notional - netPositionNotional)
+    : notional;
+  const estimatedMargin = leverage > 0 ? incrementalNotional / leverage : 0;
+  const releasedMargin = netPositionNotional > 0
+    ? Math.min(netPositionMargin, netPositionMargin * (reducedNotional / netPositionNotional))
+    : 0;
+  const marginLabel = isOppositeSideOrder && incrementalNotional === 0
+    ? "No new margin"
+    : `$${formatMoney(estimatedMargin)}`;
+  const marginHint = isOppositeSideOrder
+    ? incrementalNotional > 0
+      ? `Closes ${formatMoney(netPositionNotional, 2)} USDC, opens ${formatMoney(incrementalNotional, 2)} USDC ${side}.`
+      : `Reduces ${formatMoney(reducedNotional, 2)} USDC and releases about ${formatMoney(releasedMargin, 2)} USDC.`
+    : null;
   const mark = market ? Number(market.markPrice) : 0;
+  const orderIntent = netPosition
+    ? netPosition.side === side
+      ? `Adds to existing ${side}`
+      : incrementalNotional > 0
+        ? `Reduces ${netPosition.side}, flips ${side}`
+        : `Reduces existing ${netPosition.side}`
+    : `Opens new ${side}`;
 
   async function handleSubmit() {
     if (disabledReason) {
@@ -45,10 +70,6 @@ export function OrderForm({
       setValidationError("Market data is still loading.");
       return;
     }
-    if (hasExistingPosition) {
-      setValidationError(`The current market supports one open ${asset} position at a time. Close the existing ${currentPosition?.side ?? ""} first.`);
-      return;
-    }
     if (!Number.isFinite(notional) || notional < 100) {
       setValidationError("Enter an order value of at least 100 USDC.");
       return;
@@ -57,7 +78,7 @@ export function OrderForm({
       setValidationError("Choose leverage between 1x and 20x.");
       return;
     }
-    if (availableCollateral <= 0) {
+    if (availableCollateral <= 0 && estimatedMargin > 0) {
       setValidationError("Deposit collateral before opening a position.");
       return;
     }
@@ -67,11 +88,20 @@ export function OrderForm({
       );
       return;
     }
-    if (availableNotional <= 0) {
+    if (availableNotional <= 0 && incrementalNotional > 0) {
       setValidationError("Fund LP before trading. The pool has no available capacity yet.");
       return;
     }
     if (notional > availableNotional) {
+      if (incrementalNotional <= availableNotional) {
+        setValidationError(null);
+      } else {
+        setValidationError(
+          `Order value exceeds pool capacity. Max available notional is ${formatMoney(availableNotional, 2)} USDC.`
+        );
+        return;
+      }
+    } else if (incrementalNotional > availableNotional) {
       setValidationError(
         `Order value exceeds pool capacity. Max available notional is ${formatMoney(availableNotional, 2)} USDC.`
       );
@@ -105,10 +135,10 @@ export function OrderForm({
         <button className="terminal-tab" type="button">Pro</button>
       </div>
       <div className="toggle-group trade-side-toggle">
-        <button className={side === "long" ? "active-long" : ""} disabled={hasExistingPosition} onClick={() => setSide("long")} type="button">
+        <button className={side === "long" ? "active-long" : ""} onClick={() => setSide("long")} type="button">
           Buy / Long
         </button>
-        <button className={side === "short" ? "active-short" : ""} disabled={hasExistingPosition} onClick={() => setSide("short")} type="button">
+        <button className={side === "short" ? "active-short" : ""} onClick={() => setSide("short")} type="button">
           Sell / Short
         </button>
       </div>
@@ -118,12 +148,8 @@ export function OrderForm({
           <dd>{formatMoney(availableCollateral, 2)} USDC</dd>
         </div>
         <div>
-          <dt>Current Position</dt>
-          <dd>
-            {currentPosition
-              ? `${formatMoney(currentPosition.size, 4)} ${asset} ${currentPosition.side}`
-              : `0.0000 ${market ? asset : "COIN"}`}
-          </dd>
+          <dt>Open Positions</dt>
+          <dd>{netPosition ? `${netPosition.side} ${formatMoney(netPosition.size, 6)} ${asset}` : `0 open on ${market ? asset : "COIN"}`}</dd>
         </div>
       </dl>
       <label className="field">
@@ -148,8 +174,11 @@ export function OrderForm({
           <dd>${formatMoney(mark, 1)}</dd>
         </div>
         <div>
-          <dt>Margin Required</dt>
-          <dd>${formatMoney(estimatedMargin)}</dd>
+          <dt>{isOppositeSideOrder ? "Margin Impact" : "Margin Required"}</dt>
+          <dd>
+            {marginLabel}
+            {marginHint ? <span className="metric-subtext">{marginHint}</span> : null}
+          </dd>
         </div>
         <div>
           <dt>Funding</dt>
@@ -162,23 +191,20 @@ export function OrderForm({
       </dl>
       <button
         className={`trade-submit${side === "short" ? " trade-submit--short" : ""}`}
-        disabled={submitting || !market || Boolean(disabledReason) || hasExistingPosition}
+        disabled={submitting || !market || Boolean(disabledReason)}
         onClick={handleSubmit}
         type="button"
       >
-        {hasExistingPosition
-          ? `Close ${asset} position first`
-          : submitting
-            ? `Opening ${side}…`
-            : side === "long"
-              ? `Long ${asset}`
-              : `Short ${asset}`}
+        {submitting
+          ? `Opening ${side}…`
+          : side === "long"
+            ? `Long ${asset}`
+            : `Short ${asset}`}
       </button>
       <p className={`panel-note${validationError ? " is-error" : ""}`}>
         {validationError
-          ?? (hasExistingPosition
-            ? `One open ${asset} position per wallet is supported on the current market contract. Use the Positions table below to close it before opening another long or short.`
-            : disabledReason ?? "Signed market orders go through the selected runtime.")}
+          ?? disabledReason
+          ?? `One-way mode is active. ${orderIntent}.`}
       </p>
     </section>
   );

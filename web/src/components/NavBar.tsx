@@ -1,11 +1,17 @@
+import { VarixLogo } from "./VarixLogo";
+import type { TradeMode } from "../types";
+
 type NavBarProps = {
   collateral: string;
   identity: string | null;
   isConnected: boolean;
+  tradeMode: TradeMode;
   walletCtaLabel: string;
   walletCtaDisabled: boolean;
   walletCtaTitle?: string | null;
+  onTradeModeChange: (mode: TradeMode) => void;
   onDisconnect: () => void;
+  onFundGas?: (() => void) | null;
   onWalletCta: () => void;
   onScrollToAccount: () => void;
 };
@@ -14,23 +20,23 @@ export function NavBar({
   collateral,
   identity,
   isConnected,
+  tradeMode,
   walletCtaLabel,
   walletCtaDisabled,
   walletCtaTitle,
+  onTradeModeChange,
   onDisconnect,
+  onFundGas,
   onWalletCta,
   onScrollToAccount
 }: NavBarProps) {
   return (
     <header className="nav">
       <div className="nav-brand">
-        <div className="brand-mark" aria-hidden="true">
-          <span />
-          <span />
-        </div>
+        <VarixLogo />
         <div className="brand-copy">
-          <strong>Varix</strong>
-          <span className="brand-subtitle">Perps on Vara</span>
+          <span className="brand-subtitle">Perpetual DEX</span>
+          <strong>{tradeMode === "vara" ? "Trade global markets on Vara" : "Trade global markets on Vara.eth"}</strong>
         </div>
       </div>
       <nav className="nav-links" aria-label="Primary">
@@ -41,6 +47,22 @@ export function NavBar({
         <button className="nav-link" type="button">Leaderboard</button>
       </nav>
       <div className="nav-actions">
+        <div className="network-toggle" aria-label="Trade runtime">
+          <button
+            className={tradeMode === "vara" ? "is-active" : undefined}
+            onClick={() => onTradeModeChange("vara")}
+            type="button"
+          >
+            Vara
+          </button>
+          <button
+            className={tradeMode === "vara-eth" ? "is-active" : undefined}
+            onClick={() => onTradeModeChange("vara-eth")}
+            type="button"
+          >
+            Vara.eth
+          </button>
+        </div>
         <button
           className="nav-wallet-cta"
           disabled={walletCtaDisabled}
@@ -51,15 +73,28 @@ export function NavBar({
           {walletCtaLabel}
         </button>
         {isConnected ? (
-          <button className="nav-disconnect" onClick={onDisconnect} type="button">
-            Disconnect
-          </button>
+          <details className="wallet-menu">
+            <summary aria-label="Wallet actions">
+              Wallet
+              <span aria-hidden="true" />
+            </summary>
+            <div className="wallet-menu__content">
+              {onFundGas ? (
+                <button onClick={onFundGas} type="button">
+                  Fund Gas
+                </button>
+              ) : null}
+              <button onClick={onDisconnect} type="button">
+                Disconnect Wallet
+              </button>
+            </div>
+          </details>
         ) : null}
         <button className="deposit-chip" onClick={onScrollToAccount} type="button">
           Deposit
         </button>
         <div className="nav-account">
-          <span>Wallet</span>
+          <span>{tradeMode === "vara" ? "Vara Wallet" : "EVM Wallet"}</span>
           <strong>{identity ?? "Not connected"}</strong>
         </div>
         <div className="nav-collateral">
