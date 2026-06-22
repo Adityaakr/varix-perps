@@ -21,6 +21,7 @@ import {
   getMissingVaraEthProgramEnvKeys,
   getVaraEthMarketProgramId
 } from "../lib/config";
+import { describeActionError, isUserRejectedRequest } from "../lib/errors";
 import { getPreferredEvmProvider } from "../lib/evmProvider";
 import type {
   AccountSnapshot,
@@ -69,7 +70,7 @@ type PositionInput = {
 };
 
 type VaraEthActionHelpers = {
-  setPreconfirmed: (message: string) => void;
+  setPreconfirmed: (message: string, applyOptimistic?: () => void) => void;
   setSubmitted: (message: string, applyOptimistic?: () => void) => void;
   startBackgroundSync: (message: string, task: () => Promise<void>) => void;
   setSyncing: (message: string) => void;
@@ -88,6 +89,7 @@ type VaraEthContext = {
 
 type InjectedPromiseResult = {
   code: { isError: boolean; reason: string };
+  payload?: Hex;
   txHash?: Hex | null;
   validatorAddress?: Address | null;
   validateSignature: () => Promise<void>;
@@ -390,17 +392,7 @@ async function createSailsProgram(idl: string) {
 }
 
 function describeError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (typeof error === "string") {
-    return error;
-  }
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "Unknown Vara.eth error";
-  }
+  return describeActionError(error, "Unknown Vara.eth error");
 }
 
 function buildInjectedTxTrackerUrl(txHash: string | null) {
@@ -484,13 +476,13 @@ async function sendInjectedWithStages(
   });
 
   setStage("Waiting for wallet signature...");
-  if (typeof injected.setDefaultValidator === "function") {
-    injected.setDefaultValidator();
-  } else {
-    setStage("Selecting active validator...");
+  setStage("Selecting active validator...");
+  if (typeof injected.setSlotValidator === "function") {
     await injected.setSlotValidator();
-    setStage("Waiting for wallet signature...");
+  } else {
+    await injected.setRecipient();
   }
+  setStage("Waiting for wallet signature...");
   await injected.sign();
   const rpcData = injected._rpcData;
   if (!rpcData) {
@@ -512,34 +504,36 @@ async function sendInjectedWithStages(
     }
   );
   setStage("Submitting to validator...");
-  await injected.send();
-  const txHash = typeof injected.txHash === "string" ? injected.txHash : null;
-  if (afterAccept) {
-    await afterAccept(txHash);
+  try {
+    await injected.send();
+    const txHash = typeof injected.txHash === "string" ? injected.txHash : null;
+    if (afterAccept) {
+      await afterAccept(txHash);
+    }
+    return {
+      promise: watchedPromise.finally(() => {
+        unsubscribe?.();
+      }),
+      txHash
+    };
+  } catch (error) {
+    unsubscribe?.();
+    throw error;
   }
-  return {
-    promise: watchedPromise.finally(() => {
-      unsubscribe?.();
-    }),
-    txHash
-  };
 }
 
 async function finalizeInjectedPromise(
   promise: InjectedPromiseResult,
-  _actionLabel: string
+  actionLabel: string
 ) {
-  let validatorAddress: Address | null = null;
   try {
     await promise.validateSignature();
-    validatorAddress = promise.validatorAddress ?? null;
-  } catch {
-    // Hoodi validator registration can lag behind promise signing. Keep the
-    // transaction path usable as long as the program reply itself succeeded.
+  } catch (error) {
+    throw new Error(`Vara.eth ${actionLabel} preconfirmation signature could not be validated: ${describeError(error)}`);
   }
 
   assertReplySuccess(promise);
-  return validatorAddress;
+  return promise.validatorAddress ?? null;
 }
 
 function assertClassicReplySuccess(replyCode: Hex) {
@@ -851,6 +845,7 @@ export function useVaraEthProgram(
       buildOptimisticPosition(positionId, trader, asset, side, size, markPrice, margin, leverage),
       ...current
     ]);
+    return positionId;
   }, [asset, walletAddress]);
 
   const applyOptimisticClose = useCallback((positionToClose: PositionSnapshot) => {
@@ -1032,15 +1027,10 @@ export function useVaraEthProgram(
       setLastValidatorAddress(null);
       let optimisticSnapshot: OptimisticSnapshot | undefined;
       let shouldClearActionMessage = true;
-      const setStage = (message: string) => {
-        setActionStatusMessage(message);
-      };
-      const setPreconfirmed = (message: string) => {
-        actionPreconfirmedRef.current = true;
-        setActionPreconfirmed(true);
-        setActionStatusMessage(message);
-      };
-      const setSubmitted = (message: string, applyOptimistic?: () => void) => {
+      const applyOptimisticSnapshot = (applyOptimistic?: () => void) => {
+        if (!applyOptimistic) {
+          return;
+        }
         if (!optimisticSnapshot) {
           optimisticSnapshot = {
             account: onchainAccount,
@@ -1049,9 +1039,19 @@ export function useVaraEthProgram(
             pool: onchainPool
           };
         }
-        if (applyOptimistic) {
-          applyOptimistic();
-        }
+        applyOptimistic();
+      };
+      const setStage = (message: string) => {
+        setActionStatusMessage(message);
+      };
+      const setPreconfirmed = (message: string, applyOptimistic?: () => void) => {
+        applyOptimisticSnapshot(applyOptimistic);
+        actionPreconfirmedRef.current = true;
+        setActionPreconfirmed(true);
+        setActionStatusMessage(message);
+      };
+      const setSubmitted = (message: string, applyOptimistic?: () => void) => {
+        applyOptimisticSnapshot(applyOptimistic);
         setActionStatusMessage(message);
       };
       const setSyncing = (message: string) => {
@@ -1074,6 +1074,13 @@ export function useVaraEthProgram(
             if (syncSequenceRef.current !== syncId) {
               return;
             }
+            if (optimisticSnapshot) {
+              setOnchainAccount(optimisticSnapshot.account);
+              setOnchainMarket(optimisticSnapshot.market);
+              setOnchainPositions(optimisticSnapshot.positions);
+              setOnchainPool(optimisticSnapshot.pool);
+            }
+            actionPreconfirmedRef.current = false;
             setActionPreconfirmed(false);
             setSyncPending(false);
             setSyncStatusMessage(describeError(error));
@@ -1107,11 +1114,18 @@ export function useVaraEthProgram(
         setSyncPending(false);
         setSyncStatusMessage(null);
         setActionStatusMessage(describeError(error));
+        actionPreconfirmedRef.current = false;
+        setActionPreconfirmed(false);
+        if (isUserRejectedRequest(error)) {
+          return undefined as T;
+        }
         throw error;
       } finally {
         actionPendingRef.current = false;
-        actionPreconfirmedRef.current = false;
         setActionPending(false);
+        if (!actionPreconfirmedRef.current) {
+          setActionPreconfirmed(false);
+        }
         if (shouldClearActionMessage) {
           setActionStatusMessage(null);
         }
@@ -1201,7 +1215,8 @@ export function useVaraEthProgram(
             throw new Error("Token mint function is unavailable");
           }
 
-          const payload = mint.encodePayload(decimalToBigInt(amount, 6));
+          const amountUnits = decimalToBigInt(amount, 6);
+          const payload = mint.encodePayload(amountUnits);
           if (executionMode === "injected") {
             const injected = await api.createInjectedTransaction({
               destination: VARA_ETH_DEMO_USDC_PROGRAM_ID as Address,
@@ -1214,13 +1229,15 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("Accepted by validator. Waiting for signed Vara.eth promise...");
+                setStage("Mint accepted by validator. Waiting for signed Vara.eth promise...");
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
-              const resolved = await promise;
-              await recordInjectedPromise(resolved, "mint");
-              setActionPreconfirmed(true);
+            const resolved = await promise;
+            await recordInjectedPromise(resolved, "mint");
+            setPreconfirmed("Mint pre-confirmed on Vara.eth. Updating balance instantly...", () => {
+              applyOptimisticMint(amountUnits);
+            });
+            startBackgroundSync("Mint pre-confirmed. Syncing live token balance...", async () => {
               setSyncStatusMessage("Mint pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1291,10 +1308,11 @@ export function useVaraEthProgram(
                 { provider: api.provider, ethClient: api.eth },
                 setStage,
                 () => {
-                  setStage("Approval accepted by validator. Waiting for signed promise...");
+                  setStage("Approval accepted by validator. Waiting for signed Vara.eth promise...");
                 }
               );
               await recordInjectedPromise(await approvePromise, "deposit approval");
+              setPreconfirmed("Approval pre-confirmed on Vara.eth. Preparing deposit...");
             } else {
               await sendClassicMessage(
                 VARA_ETH_DEMO_USDC_PROGRAM_ID as Address,
@@ -1324,13 +1342,15 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("Deposit accepted by validator. Waiting for signed Vara.eth promise...");
+                setStage("Deposit accepted by validator. Waiting for signed Vara.eth promise...");
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
-              const resolved = await depositPromise;
-              await recordInjectedPromise(resolved, "deposit");
-              setActionPreconfirmed(true);
+            const resolved = await depositPromise;
+            await recordInjectedPromise(resolved, "deposit");
+            setPreconfirmed("Deposit pre-confirmed on Vara.eth. Updating collateral instantly...", () => {
+              applyOptimisticDeposit(amountUnits);
+            });
+            startBackgroundSync("Deposit pre-confirmed. Syncing live vault balance...", async () => {
               setSyncStatusMessage("Deposit pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1401,10 +1421,11 @@ export function useVaraEthProgram(
                 { provider: api.provider, ethClient: api.eth },
                 setStage,
                 () => {
-                  setStage("LP approval accepted by validator. Waiting for signed promise...");
+                  setStage("LP approval accepted by validator. Waiting for signed Vara.eth promise...");
                 }
               );
               await recordInjectedPromise(await approvePromise, "liquidity approval");
+              setPreconfirmed("LP approval pre-confirmed on Vara.eth. Preparing deposit...");
             } else {
               await sendClassicMessage(
                 VARA_ETH_DEMO_USDC_PROGRAM_ID as Address,
@@ -1434,13 +1455,15 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("LP deposit accepted by validator. Waiting for signed Vara.eth promise...");
+                setStage("LP deposit accepted by validator. Waiting for signed Vara.eth promise...");
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
-              const resolved = await liquidityPromise;
-              await recordInjectedPromise(resolved, "liquidity deposit");
-              setActionPreconfirmed(true);
+            const resolved = await liquidityPromise;
+            await recordInjectedPromise(resolved, "liquidity deposit");
+            setPreconfirmed("LP deposit pre-confirmed on Vara.eth. Updating pool instantly...", () => {
+              applyOptimisticLiquidity(amountUnits);
+            });
+            startBackgroundSync("LP deposit pre-confirmed. Syncing live pool state...", async () => {
               setSyncStatusMessage("LP deposit pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1481,13 +1504,15 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("Withdraw accepted by validator. Waiting for signed Vara.eth promise...");
+                setStage("Withdraw accepted by validator. Waiting for signed Vara.eth promise...");
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
-              const resolved = await promise;
-              await recordInjectedPromise(resolved, "withdraw");
-              setActionPreconfirmed(true);
+            const resolved = await promise;
+            await recordInjectedPromise(resolved, "withdraw");
+            setPreconfirmed("Withdraw pre-confirmed on Vara.eth. Updating balances instantly...", () => {
+              applyOptimisticWithdraw(amountUnits);
+            });
+            startBackgroundSync("Withdraw pre-confirmed. Syncing live vault state...", async () => {
               setSyncStatusMessage("Withdraw pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1522,74 +1547,53 @@ export function useVaraEthProgram(
           const marketStateQuery = marketService?.queries.MarketState;
           const poolStateQuery = poolService?.queries.PoolState;
           const vaultAccountQuery = vaultService?.queries.Account;
-          if (!openPosition || !positionsQuery) {
+          if (!openPosition) {
             throw new Error("Market trading functions are unavailable");
-          }
-          if (!marketStateQuery || !poolStateQuery || !vaultAccountQuery) {
-            throw new Error("Trade preflight queries are unavailable");
           }
 
           const existingNetPosition = onchainPositions.find((position) => position.asset === asset) ?? null;
-          const sourceActorId = evmAddressToActorId(walletAddress);
-          const runQuery = async <T>(destination: Address, query: { encodePayload: (...args: unknown[]) => Hex; decodeResult: (payload: Hex) => T }, ...args: unknown[]) => {
-            const payload = query.encodePayload(...args);
-            const reply = await api.call.program.calculateReplyForHandle(walletAddress, destination, payload);
-            assertReplySuccess(reply);
-            return query.decodeResult(reply.payload);
-          };
-          const [marketStateResult, poolState, vaultAccount] = await Promise.all([
-            runQuery<VaraMarketSnapshot>(marketProgramId as Address, marketStateQuery).catch((error) => {
-              if (isQueryOutOfGasError(error)) {
-                return null;
-              }
-              throw error;
-            }),
-            runQuery<VaraPoolState>(VARA_ETH_LIQUIDITY_POOL_PROGRAM_ID as Address, poolStateQuery),
-            runQuery<VaraAccountSnapshot>(VARA_ETH_MARGIN_VAULT_PROGRAM_ID as Address, vaultAccountQuery, sourceActorId)
-          ]);
           const notional = decimalToBigInt(input.notional, 6);
           const fallbackPrice = liveReferencePrice ?? (onchainMarket ? Number(onchainMarket.markPrice) : null);
-          const markPrice = marketStateResult
-            ? toBigInt(marketStateResult.mark_price)
-            : fallbackPrice && fallbackPrice > 0
-              ? decimalToBigInt(fallbackPrice, 8)
-              : 0n;
-          if (markPrice === 0n) {
-            throw new Error("Market price is unavailable");
-          }
-          if (!marketStateResult) {
-            setStage("MarketState query is unavailable on Hoodi. Using live terminal price for trade sizing...");
-          }
-
-          const size = (notional * SIZE_FROM_NOTIONAL_SCALE) / markPrice;
-          const actualNotional = (size * markPrice) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE;
-          const margin = divCeil(actualNotional, BigInt(input.leverage)) + 1n;
-          const isOppositeSideOrder = Boolean(existingNetPosition && existingNetPosition.side !== input.side);
-          const existingNotional = existingNetPosition
-            ? decimalStringToBigInt(existingNetPosition.notional, 6)
-            : 0n;
-          const incrementalNotional = isOppositeSideOrder
-            ? actualNotional > existingNotional
-              ? actualNotional - existingNotional
-              : 0n
-            : actualNotional;
-          const incrementalMargin = incrementalNotional > 0n
-            ? divCeil(incrementalNotional, BigInt(input.leverage)) + 1n
-            : 0n;
-          const freeCollateral = toBigInt(vaultAccount.free);
-          if (freeCollateral < incrementalMargin) {
-            throw new Error(
-              `On-chain free collateral is ${formatUnits(freeCollateral, 6)} USDC, but this trade needs ${formatUnits(incrementalMargin, 6)} USDC. If you just deposited, wait for sync to finish and try again.`
-            );
-          }
-          const liveAvailableNotional = toBigInt(poolState.max_capacity) - toBigInt(poolState.reserved_notional);
-          if (liveAvailableNotional < incrementalNotional) {
-            throw new Error(
-              `On-chain pool capacity is only ${formatUnits(liveAvailableNotional, 6)} USDC, but this trade needs ${formatUnits(incrementalNotional, 6)} USDC.`
-            );
-          }
           const side = input.side === "long" ? "Long" : "Short";
           if (executionMode === "injected") {
+            let optimisticOpenId: number | null = null;
+            const markPrice = fallbackPrice && fallbackPrice > 0
+              ? decimalToBigInt(fallbackPrice, 8)
+              : 0n;
+            if (markPrice === 0n) {
+              throw new Error("Market price is unavailable");
+            }
+            const size = (notional * SIZE_FROM_NOTIONAL_SCALE) / markPrice;
+            const actualNotional = (size * markPrice) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE;
+            const margin = divCeil(actualNotional, BigInt(input.leverage)) + 1n;
+            const isOppositeSideOrder = Boolean(existingNetPosition && existingNetPosition.side !== input.side);
+            const existingNotional = existingNetPosition
+              ? decimalStringToBigInt(existingNetPosition.notional, 6)
+              : 0n;
+            const incrementalNotional = isOppositeSideOrder
+              ? actualNotional > existingNotional
+                ? actualNotional - existingNotional
+                : 0n
+              : actualNotional;
+            const incrementalMargin = incrementalNotional > 0n
+              ? divCeil(incrementalNotional, BigInt(input.leverage)) + 1n
+              : 0n;
+            const freeCollateral = onchainAccount
+              ? decimalStringToBigInt(onchainAccount.freeCollateral, 6)
+              : 0n;
+            if (freeCollateral < incrementalMargin) {
+              throw new Error(
+                `Free collateral is ${formatUnits(freeCollateral, 6)} USDC, but this trade needs ${formatUnits(incrementalMargin, 6)} USDC.`
+              );
+            }
+            const availableNotional = onchainPool
+              ? decimalStringToBigInt(onchainPool.maxOpenNotional, 6) - decimalStringToBigInt(onchainPool.reservedNotional, 6)
+              : 0n;
+            if (availableNotional < incrementalNotional) {
+              throw new Error(
+                `Pool capacity is only ${formatUnits(availableNotional, 6)} USDC, but this trade needs ${formatUnits(incrementalNotional, 6)} USDC.`
+              );
+            }
             const injected = await api.createInjectedTransaction({
               destination: marketProgramId as Address,
               payload: openPosition.encodePayload(side, size, input.leverage, margin, input.maxSlippageBps),
@@ -1601,13 +1605,37 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("Trade accepted by validator. Waiting for signed Vara.eth promise...");
+                setPreconfirmed("Trade accepted by validator. Updating position instantly...", () => {
+                  optimisticOpenId = applyOptimisticOpen(input.side, size, markPrice, margin, input.leverage);
+                });
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
+            startBackgroundSync("Trade accepted. Verifying Vara.eth preconfirmation...", async () => {
               const resolved = await promise;
               await recordInjectedPromise(resolved, "open position");
-              setActionPreconfirmed(true);
+              if (resolved.payload && optimisticOpenId !== null) {
+                const opened = openPosition.decodeResult(resolved.payload) as VaraOpenPositionSnapshot;
+                const openedPosition = opened.position;
+                setOnchainPositions((current) => current.map((position) => (
+                  position.id === optimisticOpenId
+                    ? {
+                        ...position,
+                        id: Number(toBigInt(opened.id)),
+                        trader: opened.trader,
+                        side: toBigInt(openedPosition.size) >= 0n ? "long" : "short",
+                        size: formatUnits(
+                          toBigInt(openedPosition.size) >= 0n ? toBigInt(openedPosition.size) : -toBigInt(openedPosition.size),
+                          8
+                        ),
+                        entryPrice: formatUnits(toBigInt(openedPosition.entry_price), 8),
+                        margin: formatUnits(toBigInt(openedPosition.margin), 6),
+                        leverage: Number(openedPosition.leverage),
+                        updatedAt: Number(toBigInt(openedPosition.opened_at))
+                      }
+                    : position
+                )));
+                deletePositionDisplayOverride(walletAddress, asset, Number(toBigInt(opened.id)));
+              }
               setSyncStatusMessage("Trade pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1616,7 +1644,68 @@ export function useVaraEthProgram(
               }
               refresh();
             });
+            return;
           } else {
+            if (!positionsQuery || !marketStateQuery || !poolStateQuery || !vaultAccountQuery) {
+              throw new Error("Trade preflight queries are unavailable");
+            }
+
+            const sourceActorId = evmAddressToActorId(walletAddress);
+            const runQuery = async <T>(destination: Address, query: { encodePayload: (...args: unknown[]) => Hex; decodeResult: (payload: Hex) => T }, ...args: unknown[]) => {
+              const payload = query.encodePayload(...args);
+              const reply = await api.call.program.calculateReplyForHandle(walletAddress, destination, payload);
+              assertReplySuccess(reply);
+              return query.decodeResult(reply.payload);
+            };
+            const [marketStateResult, poolState, vaultAccount] = await Promise.all([
+              runQuery<VaraMarketSnapshot>(marketProgramId as Address, marketStateQuery).catch((error) => {
+                if (isQueryOutOfGasError(error)) {
+                  return null;
+                }
+                throw error;
+              }),
+              runQuery<VaraPoolState>(VARA_ETH_LIQUIDITY_POOL_PROGRAM_ID as Address, poolStateQuery),
+              runQuery<VaraAccountSnapshot>(VARA_ETH_MARGIN_VAULT_PROGRAM_ID as Address, vaultAccountQuery, sourceActorId)
+            ]);
+            const markPrice = marketStateResult
+              ? toBigInt(marketStateResult.mark_price)
+              : fallbackPrice && fallbackPrice > 0
+                ? decimalToBigInt(fallbackPrice, 8)
+                : 0n;
+            if (markPrice === 0n) {
+              throw new Error("Market price is unavailable");
+            }
+            if (!marketStateResult) {
+              setStage("MarketState query is unavailable on Hoodi. Using live terminal price for trade sizing...");
+            }
+
+            const size = (notional * SIZE_FROM_NOTIONAL_SCALE) / markPrice;
+            const actualNotional = (size * markPrice) / PRICE_SCALE / PRICE_TO_COLLATERAL_SCALE;
+            const margin = divCeil(actualNotional, BigInt(input.leverage)) + 1n;
+            const isOppositeSideOrder = Boolean(existingNetPosition && existingNetPosition.side !== input.side);
+            const existingNotional = existingNetPosition
+              ? decimalStringToBigInt(existingNetPosition.notional, 6)
+              : 0n;
+            const incrementalNotional = isOppositeSideOrder
+              ? actualNotional > existingNotional
+                ? actualNotional - existingNotional
+                : 0n
+              : actualNotional;
+            const incrementalMargin = incrementalNotional > 0n
+              ? divCeil(incrementalNotional, BigInt(input.leverage)) + 1n
+              : 0n;
+            const freeCollateral = toBigInt(vaultAccount.free);
+            if (freeCollateral < incrementalMargin) {
+              throw new Error(
+                `On-chain free collateral is ${formatUnits(freeCollateral, 6)} USDC, but this trade needs ${formatUnits(incrementalMargin, 6)} USDC. If you just deposited, wait for sync to finish and try again.`
+              );
+            }
+            const liveAvailableNotional = toBigInt(poolState.max_capacity) - toBigInt(poolState.reserved_notional);
+            if (liveAvailableNotional < incrementalNotional) {
+              throw new Error(
+                `On-chain pool capacity is only ${formatUnits(liveAvailableNotional, 6)} USDC, but this trade needs ${formatUnits(incrementalNotional, 6)} USDC.`
+              );
+            }
             await sendClassicMessage(
               marketProgramId as Address,
               openPosition.encodePayload(side, size, input.leverage, margin, input.maxSlippageBps),
@@ -1652,6 +1741,9 @@ export function useVaraEthProgram(
           if (positionToClose.asset !== asset) {
             throw new Error(`Switch to the ${positionToClose.asset} market tab before closing this position.`);
           }
+          if (positionToClose.id < 0) {
+            throw new Error("This position is still syncing its Vara.eth id. Close will be available as soon as preconfirmation returns the real position id.");
+          }
 
           const { api, marketProgram } = await getContext();
           const closePosition = marketProgram.services.Market?.functions.ClosePosition;
@@ -1671,13 +1763,15 @@ export function useVaraEthProgram(
               setStage,
               (acceptedTxHash) => {
                 setLastInjectedTxHash(acceptedTxHash);
-                setPreconfirmed("Close accepted by validator. Waiting for signed Vara.eth promise...");
+                setStage("Close accepted by validator. Waiting for signed Vara.eth promise...");
               }
             );
-            startBackgroundSync("Accepted by validator. Waiting for signed Vara.eth promise...", async () => {
-              const resolved = await promise;
-              await recordInjectedPromise(resolved, "close position");
-              setActionPreconfirmed(true);
+            const resolved = await promise;
+            await recordInjectedPromise(resolved, "close position");
+            setPreconfirmed("Close pre-confirmed on Vara.eth. Removing position instantly...", () => {
+              applyOptimisticClose(positionToClose);
+            });
+            startBackgroundSync("Close pre-confirmed. Syncing live market state...", async () => {
               setSyncStatusMessage("Close pre-confirmed on Vara.eth. Refreshing live state...");
               const refreshed = await refreshWithRetries(loadState, 3);
               if (!refreshed) {
@@ -1686,6 +1780,8 @@ export function useVaraEthProgram(
               }
               refresh();
             });
+            deletePositionDisplayOverride(walletAddress, asset, positionToClose.id);
+            return;
           } else {
             await sendClassicMessage(
               marketProgramId as Address,
@@ -1698,6 +1794,6 @@ export function useVaraEthProgram(
         });
       }
     }),
-    [actionPending, actionPreconfirmed, actionStatusMessage, asset, enabled, executionMode, getContext, isApiReady, lastEthereumTxHash, lastInjectedTxHash, lastReplyTxHash, lastValidatorAddress, liveReferencePrice, marketProgramId, onchainAccount, onchainMarket, onchainPool, onchainPositions, programsOk, recordInjectedPromise, refreshAfterRealWrite, runAction, runtimeWarning, sendClassicMessage, walletAddress]
+    [actionPending, actionPreconfirmed, actionStatusMessage, applyOptimisticClose, applyOptimisticDeposit, applyOptimisticLiquidity, applyOptimisticMint, applyOptimisticOpen, applyOptimisticWithdraw, asset, enabled, executionMode, getContext, isApiReady, lastEthereumTxHash, lastInjectedTxHash, lastReplyTxHash, lastValidatorAddress, liveReferencePrice, marketProgramId, onchainAccount, onchainMarket, onchainPool, onchainPositions, programsOk, recordInjectedPromise, refreshAfterRealWrite, runAction, runtimeWarning, sendClassicMessage, walletAddress]
   );
 }

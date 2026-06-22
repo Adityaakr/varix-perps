@@ -30,8 +30,9 @@ use session_registry_client::{
     SessionRegistryClientProgram,
 };
 use varix_shared::{
-    collateral_for_leverage, margin_requirement, notional_to_collateral, pnl_to_collateral, Asset,
-    BPS_DIVISOR, MarketRiskConfig, MarketSnapshot, Position, Side,
+    collateral_for_leverage, margin_requirement, notional_to_collateral, pnl_to_collateral,
+    liquidation_close_size, liquidation_penalty, skew_funding_bps, trading_fee, within_deviation,
+    within_price_band, Asset, BPS_DIVISOR, MarketRiskConfig, MarketSnapshot, Position, Side,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
@@ -69,8 +70,10 @@ pub enum MarketError {
     NoPosition,
     PositionIdOverflow,
     PositionNotOwned,
+    PriceDeviationTooLarge,
     SessionRegistryQueryFailed,
     SizeTooLarge,
+    SlippageExceeded,
     Unauthorized,
 }
 
@@ -100,6 +103,12 @@ pub struct PerpMarketState {
     snapshot: MarketSnapshot,
     last_funding_block: u32,
     next_position_id: u64,
+    taker_fee_bps: u16,
+    max_price_deviation_bps: u16,
+    max_oi_per_side: u128,
+    funding_skew_coefficient_bps: u16,
+    liquidation_penalty_bps: u16,
+    liquidation_fraction_bps: u16,
     positions: BTreeMap<u64, OpenPosition>,
     trader_positions: BTreeMap<ActorId, Vec<u64>>,
 }
@@ -282,6 +291,9 @@ impl<'a> MarketService<'a> {
     fn funding_rate(
         mark_price: u128,
         index_price: u128,
+        oi_long: u128,
+        oi_short: u128,
+        skew_coefficient_bps: u16,
         max_velocity_bps: i16,
     ) -> Result<i128, MarketError> {
         if index_price == 0 {
@@ -290,7 +302,12 @@ impl<'a> MarketService<'a> {
         let premium_bps = ((mark_price as i128 - index_price as i128) * BPS_DIVISOR as i128)
             .checked_div(index_price as i128)
             .ok_or(MarketError::InvalidPrice)?;
-        Ok(premium_bps.clamp(-(max_velocity_bps as i128), max_velocity_bps as i128))
+        // Add an open-interest skew term so a lopsided book is funded back toward
+        // balance and the pool is compensated for the net directional exposure it
+        // is carrying as counterparty.
+        let skew_bps = skew_funding_bps(oi_long, oi_short, skew_coefficient_bps);
+        let combined = premium_bps.saturating_add(skew_bps);
+        Ok(combined.clamp(-(max_velocity_bps as i128), max_velocity_bps as i128))
     }
 
     fn next_position_id(state: &mut PerpMarketState) -> Result<u64, MarketError> {
@@ -483,6 +500,35 @@ impl<'a> MarketService<'a> {
         Ok(())
     }
 
+    /// Charge a taker fee for a trade: move the fee from the trader's vault free
+    /// balance into the pool, then record it as realized LP yield. No-op when the
+    /// fee is zero or the vault/pool are not configured (demo mode).
+    async fn charge_trading_fee(
+        vault_id: Option<ActorId>,
+        pool_id: Option<ActorId>,
+        trader: ActorId,
+        fee: u128,
+    ) -> Result<(), MarketError> {
+        if fee == 0 {
+            return Ok(());
+        }
+        let (Some(vault_id), Some(pool_id)) = (vault_id, pool_id) else {
+            return Ok(());
+        };
+        let vault = MarginVaultClientProgram::client(vault_id);
+        let mut vault = vault.vault();
+        vault
+            .charge_fee(trader, fee, pool_id)
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        let pool = LiquidityPoolClientProgram::client(pool_id);
+        let mut pool = pool.pool();
+        pool.collect_fee(fee)
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        Ok(())
+    }
+
     async fn reserve_in_pool(pool_id: ActorId, amount: u128) -> Result<(), MarketError> {
         if amount == 0 {
             return Ok(());
@@ -566,6 +612,30 @@ impl<'a> MarketService<'a> {
         Ok(())
     }
 
+    async fn fund_insurance(pool_id: ActorId, amount: u128) -> Result<(), MarketError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let pool = LiquidityPoolClientProgram::client(pool_id);
+        let mut pool = pool.pool();
+        pool.fund_insurance(amount)
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        Ok(())
+    }
+
+    async fn cover_bad_debt(pool_id: ActorId, amount: u128) -> Result<(), MarketError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let pool = LiquidityPoolClientProgram::client(pool_id);
+        let mut pool = pool.pool();
+        pool.cover_bad_debt(amount)
+            .await
+            .map_err(|_| MarketError::ExternalIntegrationFailed)?;
+        Ok(())
+    }
+
     async fn settle_in_vault(
         vault_id: ActorId,
         trader: ActorId,
@@ -609,9 +679,112 @@ impl MarketService<'_> {
         if mark_price == 0 || index_price == 0 {
             return Err(MarketError::InvalidPrice);
         }
+        // Circuit breaker: reject a push that jumps the mark or index further than
+        // the configured tolerance from the last accepted value. Guards against a
+        // fat-finger or compromised owner key wicking the price for liquidations.
+        let guard = state.max_price_deviation_bps;
+        if guard != 0 {
+            if state.snapshot.mark_price != 0
+                && !within_deviation(state.snapshot.mark_price, mark_price, guard)
+            {
+                return Err(MarketError::PriceDeviationTooLarge);
+            }
+            if state.snapshot.index_price != 0
+                && !within_deviation(state.snapshot.index_price, index_price, guard)
+            {
+                return Err(MarketError::PriceDeviationTooLarge);
+            }
+        }
         state.snapshot.mark_price = mark_price;
         state.snapshot.index_price = index_price;
         Ok(state.snapshot)
+    }
+
+    /// Owner-only: bound how far a single `update_price` may move the mark/index
+    /// from the previous value, in basis points. `0` disables the circuit breaker.
+    #[export(unwrap_result)]
+    pub fn set_price_guard(&mut self, max_price_deviation_bps: u16) -> Result<u16, MarketError> {
+        let mut state = self.state.borrow_mut();
+        MarketService::require_owner(&state)?;
+        state.max_price_deviation_bps = max_price_deviation_bps;
+        Ok(state.max_price_deviation_bps)
+    }
+
+    #[export]
+    pub fn price_guard(&self) -> u16 {
+        self.state.borrow().max_price_deviation_bps
+    }
+
+    /// Owner-only: set the taker fee (basis points of traded notional) charged on
+    /// position opens. `0` disables fees.
+    #[export(unwrap_result)]
+    pub fn set_fees(&mut self, taker_fee_bps: u16) -> Result<u16, MarketError> {
+        let mut state = self.state.borrow_mut();
+        MarketService::require_owner(&state)?;
+        state.taker_fee_bps = taker_fee_bps;
+        Ok(state.taker_fee_bps)
+    }
+
+    #[export]
+    pub fn fee_config(&self) -> u16 {
+        self.state.borrow().taker_fee_bps
+    }
+
+    /// Owner-only: cap the open interest allowed on each side of the book. `0`
+    /// means uncapped.
+    #[export(unwrap_result)]
+    pub fn set_oi_cap(&mut self, max_oi_per_side: u128) -> Result<u128, MarketError> {
+        let mut state = self.state.borrow_mut();
+        MarketService::require_owner(&state)?;
+        state.max_oi_per_side = max_oi_per_side;
+        Ok(state.max_oi_per_side)
+    }
+
+    #[export]
+    pub fn oi_cap(&self) -> u128 {
+        self.state.borrow().max_oi_per_side
+    }
+
+    /// Owner-only: set the funding skew coefficient (basis points applied at a
+    /// fully one-sided book). `0` falls back to pure premium funding.
+    #[export(unwrap_result)]
+    pub fn set_funding_skew(&mut self, coefficient_bps: u16) -> Result<u16, MarketError> {
+        let mut state = self.state.borrow_mut();
+        MarketService::require_owner(&state)?;
+        state.funding_skew_coefficient_bps = coefficient_bps;
+        Ok(state.funding_skew_coefficient_bps)
+    }
+
+    #[export]
+    pub fn funding_skew(&self) -> u16 {
+        self.state.borrow().funding_skew_coefficient_bps
+    }
+
+    /// Owner-only: configure liquidations. `penalty_bps` is charged on the
+    /// liquidated notional and routed to the insurance fund; `fraction_bps` is
+    /// the share of a position closed per liquidation call (`0` or `>= 10_000`
+    /// closes the whole position).
+    #[export(unwrap_result)]
+    pub fn set_liquidation_config(
+        &mut self,
+        penalty_bps: u16,
+        fraction_bps: u16,
+    ) -> Result<(), MarketError> {
+        let mut state = self.state.borrow_mut();
+        MarketService::require_owner(&state)?;
+        state.liquidation_penalty_bps = penalty_bps;
+        state.liquidation_fraction_bps = fraction_bps;
+        Ok(())
+    }
+
+    #[export]
+    pub fn liquidation_penalty_bps(&self) -> u16 {
+        self.state.borrow().liquidation_penalty_bps
+    }
+
+    #[export]
+    pub fn liquidation_fraction_bps(&self) -> u16 {
+        self.state.borrow().liquidation_fraction_bps
     }
 
     #[export(unwrap_result)]
@@ -621,10 +794,10 @@ impl MarketService<'_> {
         size: u128,
         leverage: u16,
         margin: u128,
-        _max_slippage_bps: u16,
+        max_slippage_bps: u16,
     ) -> Result<OpenPosition, MarketError> {
         let trader = self.resolve_trader(TraderAction::Trade).await?;
-        let (mark_price, cumulative_funding_rate_bps, liquidity_pool, margin_vault) = {
+        let (mark_price, cumulative_funding_rate_bps, liquidity_pool, margin_vault, taker_fee_bps) = {
             let state = self.state.borrow();
             if size == 0 {
                 return Err(MarketError::InvalidSize);
@@ -632,14 +805,24 @@ impl MarketService<'_> {
             if leverage == 0 || leverage > state.config.risk.max_leverage {
                 return Err(MarketError::InvalidLeverage);
             }
-            if state.snapshot.mark_price == 0 {
+            if state.snapshot.mark_price == 0 || state.snapshot.index_price == 0 {
                 return Err(MarketError::InvalidPrice);
+            }
+            // Oracle price-band guard: refuse to fill when the mark price has
+            // dislocated from the index beyond the trader's slippage tolerance.
+            if !within_price_band(
+                state.snapshot.mark_price,
+                state.snapshot.index_price,
+                max_slippage_bps,
+            ) {
+                return Err(MarketError::SlippageExceeded);
             }
             (
                 state.snapshot.mark_price,
                 state.snapshot.cumulative_funding_rate_bps,
                 state.config.liquidity_pool(),
                 state.config.margin_vault(),
+                state.taker_fee_bps,
             )
         };
 
@@ -647,15 +830,43 @@ impl MarketService<'_> {
         let required_margin =
             collateral_for_leverage(notional, leverage).ok_or(MarketError::InvalidLeverage)?;
 
+        // Taker fee on the traded notional. Charged up front from free collateral;
+        // an order the trader cannot cover the fee for is rejected before any
+        // margin is locked or pool capacity reserved.
+        let fee = trading_fee(notional, taker_fee_bps).ok_or(MarketError::InvalidSize)?;
+        MarketService::charge_trading_fee(margin_vault, liquidity_pool, trader, fee).await?;
+
         let signed_size = side
             .direction()
             .checked_mul(size as i128)
             .ok_or(MarketError::InvalidSize)?;
 
-        let existing = {
+        let (existing, max_oi_per_side, current_side_oi) = {
             let state = self.state.borrow();
-            MarketService::trader_net_position(&state, trader)
+            let current_side_oi = if side == Side::Long {
+                state.snapshot.open_interest_long
+            } else {
+                state.snapshot.open_interest_short
+            };
+            (
+                MarketService::trader_net_position(&state, trader),
+                state.max_oi_per_side,
+                current_side_oi,
+            )
         };
+
+        // Open-interest cap: bound the additional exposure this order adds to its
+        // side so the pool's net directional risk as counterparty stays capped.
+        if max_oi_per_side != 0 {
+            let oi_addition = match &existing {
+                None => size,
+                Some(open) if open.position.size.signum() == signed_size.signum() => size,
+                Some(open) => size.saturating_sub(open.position.size.unsigned_abs()),
+            };
+            if current_side_oi.saturating_add(oi_addition) > max_oi_per_side {
+                return Err(MarketError::SizeTooLarge);
+            }
+        }
 
         let Some(existing) = existing else {
             if margin < required_margin {
@@ -1021,6 +1232,9 @@ impl MarketService<'_> {
         let new_rate = MarketService::funding_rate(
             state.snapshot.mark_price,
             state.snapshot.index_price,
+            state.snapshot.open_interest_long,
+            state.snapshot.open_interest_short,
+            state.funding_skew_coefficient_bps,
             state.config.risk.max_funding_velocity_bps,
         )?;
         state.snapshot.funding_rate_bps = new_rate;
@@ -1043,7 +1257,7 @@ impl MarketService<'_> {
         let mut liquidated_any = false;
 
         for position_id in position_ids {
-            let (open_position, mark_price, cumulative_funding_rate_bps, maintenance_bps, pool_id, vault_id) = {
+            let (open_position, mark_price, index_price, cumulative_funding_rate_bps, maintenance_bps, penalty_bps, fraction_bps, pool_id, vault_id) = {
                 let state = self.state.borrow();
                 let Some(open_position) = state.positions.get(&position_id).cloned() else {
                     continue;
@@ -1051,55 +1265,111 @@ impl MarketService<'_> {
                 (
                     open_position,
                     state.snapshot.mark_price,
+                    state.snapshot.index_price,
                     state.snapshot.cumulative_funding_rate_bps,
                     state.config.risk.maintenance_margin_bps,
+                    state.liquidation_penalty_bps,
+                    state.liquidation_fraction_bps,
                     state.config.liquidity_pool(),
                     state.config.margin_vault(),
                 )
             };
 
+            // Liquidate against the index price, not the mark. The index is the
+            // signature-verified oracle value and is far harder to wick than a
+            // single mark push, so the solvency decision can't be manipulated by
+            // a transient mark dislocation.
+            let liquidation_price = if index_price != 0 { index_price } else { mark_price };
+            let _ = mark_price;
             let equity = MarketService::equity(
                 &open_position.position,
-                mark_price,
+                liquidation_price,
                 cumulative_funding_rate_bps,
             )?;
             let maintenance = MarketService::maintenance_margin(
                 &open_position.position,
-                mark_price,
+                liquidation_price,
                 maintenance_bps,
             )?;
-            if equity <= maintenance as i128 {
-                let released_notional =
-                    notional_to_collateral(open_position.position.size.unsigned_abs(), mark_price)
-                        .ok_or(MarketError::InvalidSize)?;
-                if let Some(pool_id) = pool_id {
-                    MarketService::release_in_pool(pool_id, released_notional).await?;
+            if equity > maintenance as i128 {
+                continue;
+            }
+
+            // Partial liquidation: close only a slice per call (fraction_bps), so a
+            // distressed position is wound down in steps instead of dumped whole.
+            let full_size = open_position.position.size.unsigned_abs();
+            let close_size = liquidation_close_size(full_size, fraction_bps);
+            let closed_notional = notional_to_collateral(close_size, liquidation_price)
+                .ok_or(MarketError::InvalidSize)?;
+            let (remaining, close) = MarketService::preview_close(
+                &open_position.position,
+                close_size,
+                liquidation_price,
+                cumulative_funding_rate_bps,
+            )?;
+
+            // Penalty (bps of closed notional) is taken from the trader's
+            // settlement and routed to the insurance fund. Bad debt — the slice's
+            // loss exceeding its margin — is reimbursed to the pool from insurance.
+            let penalty = liquidation_penalty(closed_notional, penalty_bps)
+                .unwrap_or(0)
+                .min(close.payout);
+            let trader_payout = close.payout.saturating_sub(penalty);
+            let payout_i =
+                close.released_margin as i128 + close.realized_pnl - close.funding_paid;
+            let bad_debt = if payout_i < 0 { payout_i.unsigned_abs() } else { 0 };
+
+            if let Some(pool_id) = pool_id {
+                MarketService::release_in_pool(pool_id, closed_notional).await?;
+            }
+            if close.released_margin > 0 {
+                if trader_payout > close.released_margin {
+                    let pool_id = pool_id.ok_or(MarketError::MissingLiquidityPool)?;
+                    let vault_id = vault_id.ok_or(MarketError::MissingMarginVault)?;
+                    MarketService::pay_profit_to_vault(
+                        pool_id,
+                        vault_id,
+                        trader_payout.saturating_sub(close.released_margin),
+                    )
+                    .await?;
                 }
                 if let Some(vault_id) = vault_id {
-                    MarketService::slash_in_vault(
+                    MarketService::settle_in_vault(
                         vault_id,
                         open_position.trader,
-                        open_position.position.margin,
+                        close.released_margin,
+                        trader_payout,
                         pool_id.unwrap_or_else(zero_actor_id),
                     )
                     .await?;
                 }
-
-                let mut state = self.state.borrow_mut();
-                if open_position.position.size > 0 {
-                    state.snapshot.open_interest_long = state
-                        .snapshot
-                        .open_interest_long
-                        .saturating_sub(open_position.position.size.unsigned_abs());
-                } else {
-                    state.snapshot.open_interest_short = state
-                        .snapshot
-                        .open_interest_short
-                        .saturating_sub(open_position.position.size.unsigned_abs());
-                }
-                let _ = MarketService::remove_position(&mut state, position_id);
-                liquidated_any = true;
             }
+            if let Some(pool_id) = pool_id {
+                MarketService::fund_insurance(pool_id, penalty).await?;
+                MarketService::cover_bad_debt(pool_id, bad_debt).await?;
+            }
+
+            let mut state = self.state.borrow_mut();
+            if open_position.position.size > 0 {
+                state.snapshot.open_interest_long =
+                    state.snapshot.open_interest_long.saturating_sub(close_size);
+            } else {
+                state.snapshot.open_interest_short =
+                    state.snapshot.open_interest_short.saturating_sub(close_size);
+            }
+            if remaining.size == 0 {
+                let _ = MarketService::remove_position(&mut state, position_id);
+            } else {
+                state.positions.insert(
+                    position_id,
+                    OpenPosition {
+                        id: position_id,
+                        trader: open_position.trader,
+                        position: remaining,
+                    },
+                );
+            }
+            liquidated_any = true;
         }
 
         Ok(liquidated_any)
@@ -1168,6 +1438,12 @@ impl Program {
             },
             last_funding_block: exec::block_height(),
             next_position_id: 1,
+            taker_fee_bps: 0,
+            max_price_deviation_bps: 0,
+            max_oi_per_side: 0,
+            funding_skew_coefficient_bps: 0,
+            liquidation_penalty_bps: 0,
+            liquidation_fraction_bps: 0,
             positions: BTreeMap::new(),
             trader_positions: BTreeMap::new(),
         };

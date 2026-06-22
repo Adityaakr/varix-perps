@@ -2,7 +2,7 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sails_rs::{cell::RefCell, collections::BTreeMap, gstd::msg, prelude::*};
-use varix_shared::{Asset, OracleQuote};
+use varix_shared::{within_deviation, Asset, OracleQuote};
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
@@ -11,6 +11,7 @@ pub enum OracleError {
     InvalidSignature,
     InvalidSignatureLength,
     InvalidVerifyingKey,
+    PriceDeviationTooLarge,
     PriceOutdated,
     RelayerNotAuthorized,
     Unauthorized,
@@ -36,6 +37,7 @@ pub enum OracleEvent {
 #[derive(Default)]
 pub struct OracleState {
     owner: ActorId,
+    max_deviation_bps: u16,
     relayers: BTreeMap<ActorId, [u8; 32]>,
     quotes: BTreeMap<Asset, OracleQuote>,
 }
@@ -110,6 +112,13 @@ impl OracleService<'_> {
             if timestamp <= existing.timestamp {
                 return Err(OracleError::PriceOutdated);
             }
+            // Circuit breaker: reject a submission that deviates further than the
+            // configured tolerance from the last accepted price for this asset.
+            if state.max_deviation_bps != 0
+                && !within_deviation(existing.price, price, state.max_deviation_bps)
+            {
+                return Err(OracleError::PriceDeviationTooLarge);
+            }
         }
 
         let verifying_key =
@@ -131,6 +140,21 @@ impl OracleService<'_> {
         })
         .expect("event emission should succeed");
         Ok(quote)
+    }
+
+    /// Owner-only: bound how far each signed price submission may move from the
+    /// previous accepted price for the same asset, in basis points. `0` disables.
+    #[export(unwrap_result)]
+    pub fn set_deviation_guard(&mut self, max_deviation_bps: u16) -> Result<u16, OracleError> {
+        let mut state = self.state.borrow_mut();
+        OracleService::require_owner(&state)?;
+        state.max_deviation_bps = max_deviation_bps;
+        Ok(state.max_deviation_bps)
+    }
+
+    #[export]
+    pub fn deviation_guard(&self) -> u16 {
+        self.state.borrow().max_deviation_bps
     }
 
     #[export]

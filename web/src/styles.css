@@ -116,7 +116,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 14px;
-  min-width: 300px;
+  min-width: 184px;
 }
 
 .varix-logo {
@@ -1423,6 +1423,10 @@ button:disabled {
   font-weight: 650;
 }
 
+.positions-empty.is-error {
+  color: #ff896e;
+}
+
 .positions-detail-panel {
   display: flex;
   flex-direction: column;
@@ -1571,9 +1575,6 @@ button:disabled {
     grid-template-columns: minmax(480px, 1fr) 280px 340px;
   }
 
-  .brand-copy strong {
-    display: none;
-  }
 }
 
 @media (max-width: 1120px) {

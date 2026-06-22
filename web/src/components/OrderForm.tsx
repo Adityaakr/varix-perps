@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { MarketSnapshot, PositionSnapshot } from "../types";
+import { describeActionError } from "../lib/errors";
 import { formatMoney } from "../lib/format";
 
 type OrderFormProps = {
@@ -9,6 +10,8 @@ type OrderFormProps = {
   openPositions: PositionSnapshot[];
   disabledReason: string | null;
   market: MarketSnapshot | null;
+  /** On-chain taker fee in basis points (perp-market `fee_config`). Defaults to 0. */
+  takerFeeBps?: number;
   onSubmit: (input: {
     side: "long" | "short";
     notional: number;
@@ -24,11 +27,13 @@ export function OrderForm({
   openPositions,
   disabledReason,
   market,
+  takerFeeBps = 0,
   onSubmit
 }: OrderFormProps) {
   const [side, setSide] = useState<"long" | "short">("long");
   const [notional, setNotional] = useState(1_000);
   const [leverage, setLeverage] = useState(5);
+  const [maxSlippageBps, setMaxSlippageBps] = useState(30);
   const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -53,6 +58,17 @@ export function OrderForm({
       : `Reduces ${formatMoney(reducedNotional, 2)} USDC and releases about ${formatMoney(releasedMargin, 2)} USDC.`
     : null;
   const mark = market ? Number(market.markPrice) : 0;
+  // Taker fee charged on the incremental notional that actually opens (the
+  // on-chain perp-market charges its fee on opened notional).
+  const estimatedFee = (incrementalNotional * takerFeeBps) / 10_000;
+  // Estimated liquidation price for the opening leg. Simple leverage-based
+  // estimate (entry fills at mark; maintenance margin pulls the real level
+  // slightly closer), shown only when the order actually adds exposure.
+  const estimatedLiquidationPrice = incrementalNotional > 0 && leverage > 0 && mark > 0
+    ? side === "long"
+      ? mark * (1 - 1 / leverage)
+      : mark * (1 + 1 / leverage)
+    : null;
   const orderIntent = netPosition
     ? netPosition.side === side
       ? `Adds to existing ${side}`
@@ -115,8 +131,10 @@ export function OrderForm({
         side,
         notional,
         leverage,
-        maxSlippageBps: 30
+        maxSlippageBps
       });
+    } catch (error) {
+      setValidationError(describeActionError(error));
     } finally {
       setSubmitting(false);
     }
@@ -164,6 +182,19 @@ export function OrderForm({
         <input max={20} min={1} onChange={(event) => setLeverage(Number(event.target.value))} type="range" value={leverage} />
         <strong className="range-value">{leverage}x</strong>
       </label>
+      <label className="field">
+        <span>Max Slippage</span>
+        <div className="field-shell">
+          <input
+            min={1}
+            max={1000}
+            onChange={(event) => setMaxSlippageBps(Math.max(0, Number(event.target.value)))}
+            type="number"
+            value={maxSlippageBps}
+          />
+          <em>bps</em>
+        </div>
+      </label>
       <div className="trade-checkboxes">
         <label><input type="checkbox" /> Reduce Only</label>
         <label><input type="checkbox" /> Take Profit / Stop Loss</label>
@@ -183,6 +214,17 @@ export function OrderForm({
         <div>
           <dt>Funding</dt>
           <dd>{market ? `${(market.fundingRateBps / 100).toFixed(2)} bps` : "-"}</dd>
+        </div>
+        <div>
+          <dt>Est. Liq. Price</dt>
+          <dd>{estimatedLiquidationPrice === null ? "-" : `$${formatMoney(estimatedLiquidationPrice, 1)}`}</dd>
+        </div>
+        <div>
+          <dt>Est. Fee</dt>
+          <dd>
+            {`$${formatMoney(estimatedFee, 2)}`}
+            <span className="metric-subtext">{`${(takerFeeBps / 100).toFixed(2)}% taker`}</span>
+          </dd>
         </div>
         <div>
           <dt>Pool Capacity</dt>

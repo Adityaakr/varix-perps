@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { describeActionError } from "../lib/errors";
 import { formatMoney, formatSignedMoney } from "../lib/format";
 import type { MarketSnapshot, PositionSnapshot, RecentTrade } from "../types";
 
@@ -75,6 +76,7 @@ export function PositionsTable({
 }: PositionsTableProps) {
   const [activeTab, setActiveTab] = useState<TabId>("positions");
   const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const livePositions = useMemo(() => {
     return positions.map((position) => {
@@ -137,9 +139,16 @@ export function PositionsTable({
     : null;
 
   async function handleClose(position: PositionSnapshot) {
+    if (position.id < 0) {
+      setActionError("Position id is syncing. Close will unlock after Vara.eth preconfirmation.");
+      return;
+    }
     setClosingPositionKey(`${position.asset}:${position.id}`);
+    setActionError(null);
     try {
       await onClose(position);
+    } catch (error) {
+      setActionError(describeActionError(error));
     } finally {
       setClosingPositionKey(null);
     }
@@ -195,15 +204,20 @@ export function PositionsTable({
                 </span>
                 <button
                   className="table-button"
-                  disabled={closingPositionKey !== null}
+                  disabled={closingPositionKey !== null || position.id < 0}
                   onClick={() => void handleClose(position.rawPosition)}
                   type="button"
                 >
-                  {closingPositionKey === `${position.asset}:${position.id}` ? "Closing..." : "Close"}
+                  {position.id < 0
+                    ? "Syncing"
+                    : closingPositionKey === `${position.asset}:${position.id}`
+                      ? "Closing..."
+                      : "Close"}
                 </button>
               </div>
             ))
           )}
+          {actionError ? <div className="positions-empty is-error">{actionError}</div> : null}
         </div>
       ) : null}
 

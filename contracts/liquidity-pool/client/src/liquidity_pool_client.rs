@@ -51,10 +51,34 @@ pub mod pool {
             &mut self,
             market: ActorId,
         ) -> sails_rs::client::PendingCall<io::AuthorizeMarket, Self::Env>;
+        /// Credit a trading fee to the pool. Tokens have already been transferred in
+        /// by the margin vault; this records the fee as realized LP yield by growing
+        /// `total_liquidity` without minting shares, so every existing provider's
+        /// share value rises. Callable only by an authorized market.
+        fn collect_fee(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::CollectFee, Self::Env>;
+        /// Reimburse LP liquidity for bad debt out of the insurance fund. Moves up to
+        /// `amount` (capped at the available insurance balance) from the insurance
+        /// bucket back into `total_liquidity`; both sit in the same token custody, so
+        /// this is pure accounting. Returns the amount actually covered. Callable
+        /// only by an authorized market.
+        fn cover_bad_debt(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::CoverBadDebt, Self::Env>;
         fn deposit_liquidity(
             &mut self,
             amount: u128,
         ) -> sails_rs::client::PendingCall<io::DepositLiquidity, Self::Env>;
+        /// Earmark tokens already transferred into the pool (a liquidation penalty)
+        /// as insurance-fund balance, held separately from LP liquidity. Callable
+        /// only by an authorized market.
+        fn fund_insurance(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::FundInsurance, Self::Env>;
         fn pay_out_to_vault(
             &mut self,
             vault: ActorId,
@@ -80,6 +104,10 @@ pub mod pool {
             &self,
             provider: ActorId,
         ) -> sails_rs::client::PendingCall<io::Account, Self::Env>;
+        fn fees_collected(&self) -> sails_rs::client::PendingCall<io::FeesCollected, Self::Env>;
+        fn insurance_balance(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::InsuranceBalance, Self::Env>;
         fn pool_state(&self) -> sails_rs::client::PendingCall<io::PoolState, Self::Env>;
     }
     pub struct PoolImpl;
@@ -91,10 +119,28 @@ pub mod pool {
         ) -> sails_rs::client::PendingCall<io::AuthorizeMarket, Self::Env> {
             self.pending_call((market,))
         }
+        fn collect_fee(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::CollectFee, Self::Env> {
+            self.pending_call((amount,))
+        }
+        fn cover_bad_debt(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::CoverBadDebt, Self::Env> {
+            self.pending_call((amount,))
+        }
         fn deposit_liquidity(
             &mut self,
             amount: u128,
         ) -> sails_rs::client::PendingCall<io::DepositLiquidity, Self::Env> {
+            self.pending_call((amount,))
+        }
+        fn fund_insurance(
+            &mut self,
+            amount: u128,
+        ) -> sails_rs::client::PendingCall<io::FundInsurance, Self::Env> {
             self.pending_call((amount,))
         }
         fn pay_out_to_vault(
@@ -134,6 +180,14 @@ pub mod pool {
         ) -> sails_rs::client::PendingCall<io::Account, Self::Env> {
             self.pending_call((provider,))
         }
+        fn fees_collected(&self) -> sails_rs::client::PendingCall<io::FeesCollected, Self::Env> {
+            self.pending_call(())
+        }
+        fn insurance_balance(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::InsuranceBalance, Self::Env> {
+            self.pending_call(())
+        }
         fn pool_state(&self) -> sails_rs::client::PendingCall<io::PoolState, Self::Env> {
             self.pending_call(())
         }
@@ -142,22 +196,20 @@ pub mod pool {
     pub mod io {
         use super::*;
         sails_rs::io_struct_impl!(AuthorizeMarket (market: ActorId) -> ());
+        sails_rs::io_struct_impl!(CollectFee (amount: u128) -> super::PoolState);
+        sails_rs::io_struct_impl!(CoverBadDebt (amount: u128) -> u128);
         sails_rs::io_struct_impl!(DepositLiquidity (amount: u128) -> super::LpAccount);
+        sails_rs::io_struct_impl!(FundInsurance (amount: u128) -> u128);
         sails_rs::io_struct_impl!(PayOutToVault (vault: ActorId, amount: u128) -> super::PoolState);
         sails_rs::io_struct_impl!(ReleaseNotional (amount: u128) -> super::PoolState);
         sails_rs::io_struct_impl!(ReserveNotional (amount: u128) -> super::PoolState);
         sails_rs::io_struct_impl!(RevokeMarket (market: ActorId) -> ());
         sails_rs::io_struct_impl!(WithdrawLiquidity (shares: u128) -> super::LpAccount);
         sails_rs::io_struct_impl!(Account (provider: ActorId) -> super::LpAccount);
+        sails_rs::io_struct_impl!(FeesCollected () -> u128);
+        sails_rs::io_struct_impl!(InsuranceBalance () -> u128);
         sails_rs::io_struct_impl!(PoolState () -> super::PoolState);
     }
-}
-#[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
-#[codec(crate = sails_rs::scale_codec)]
-#[scale_info(crate = sails_rs::scale_info)]
-pub struct LpAccount {
-    pub shares: u128,
-    pub deposited: u128,
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
 #[codec(crate = sails_rs::scale_codec)]
@@ -167,4 +219,11 @@ pub struct PoolState {
     pub total_shares: u128,
     pub reserved_notional: u128,
     pub max_capacity: u128,
+}
+#[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]
+#[codec(crate = sails_rs::scale_codec)]
+#[scale_info(crate = sails_rs::scale_info)]
+pub struct LpAccount {
+    pub shares: u128,
+    pub deposited: u128,
 }

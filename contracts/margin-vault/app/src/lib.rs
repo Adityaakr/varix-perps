@@ -434,6 +434,51 @@ impl VaultService<'_> {
             .await
     }
 
+    /// Deduct a trading fee from a trader's free balance and forward the tokens
+    /// to the liquidity pool. Called by an authorized market on trade execution.
+    /// Strict: fails if the trader's free balance cannot cover the full fee.
+    #[export(unwrap_result)]
+    pub async fn charge_fee(
+        &mut self,
+        trader: ActorId,
+        amount: u128,
+        pool: ActorId,
+    ) -> Result<AccountSnapshot, VaultError> {
+        VaultService::require_positive(amount)?;
+
+        let (snapshot, token_program) = {
+            let mut state = self.state.borrow_mut();
+            VaultService::require_market(&state)?;
+
+            let free = state.free_balances.entry(trader).or_default();
+            if *free < amount {
+                return Err(VaultError::InsufficientFreeBalance);
+            }
+            *free -= amount;
+            let snapshot = AccountSnapshot {
+                free: *free,
+                locked: state.locked_balances.get(&trader).copied().unwrap_or_default(),
+            };
+            (
+                snapshot,
+                state.token_program.ok_or(VaultError::MissingTokenProgram)?,
+            )
+        };
+
+        let pool = optional_actor_id(pool).ok_or(VaultError::Unauthorized)?;
+        let token = DemoUsdcVftClientProgram::client(token_program);
+        let mut token = token.token();
+        let transferred = token
+            .transfer(pool, amount)
+            .await
+            .map_err(|_| VaultError::TokenTransferFailed)?;
+        if !transferred {
+            return Err(VaultError::TokenTransferFailed);
+        }
+
+        Ok(snapshot)
+    }
+
     #[export]
     pub fn account(&self, trader: ActorId) -> AccountSnapshot {
         let state = self.state.borrow();

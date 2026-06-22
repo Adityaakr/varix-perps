@@ -67,8 +67,41 @@ pub mod market {
             size: u128,
             leverage: u16,
             margin: u128,
-            _max_slippage_bps: u16,
+            max_slippage_bps: u16,
         ) -> sails_rs::client::PendingCall<io::OpenPosition, Self::Env>;
+        /// Owner-only: set the taker fee (basis points of traded notional) charged on
+        /// position opens. `0` disables fees.
+        fn set_fees(
+            &mut self,
+            taker_fee_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetFees, Self::Env>;
+        /// Owner-only: set the funding skew coefficient (basis points applied at a
+        /// fully one-sided book). `0` falls back to pure premium funding.
+        fn set_funding_skew(
+            &mut self,
+            coefficient_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetFundingSkew, Self::Env>;
+        /// Owner-only: configure liquidations. `penalty_bps` is charged on the
+        /// liquidated notional and routed to the insurance fund; `fraction_bps` is
+        /// the share of a position closed per liquidation call (`0` or `>= 10_000`
+        /// closes the whole position).
+        fn set_liquidation_config(
+            &mut self,
+            penalty_bps: u16,
+            fraction_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetLiquidationConfig, Self::Env>;
+        /// Owner-only: cap the open interest allowed on each side of the book. `0`
+        /// means uncapped.
+        fn set_oi_cap(
+            &mut self,
+            max_oi_per_side: u128,
+        ) -> sails_rs::client::PendingCall<io::SetOiCap, Self::Env>;
+        /// Owner-only: bound how far a single `update_price` may move the mark/index
+        /// from the previous value, in basis points. `0` disables the circuit breaker.
+        fn set_price_guard(
+            &mut self,
+            max_price_deviation_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetPriceGuard, Self::Env>;
         fn settle_funding(&mut self)
         -> sails_rs::client::PendingCall<io::SettleFunding, Self::Env>;
         fn update_price(
@@ -77,7 +110,16 @@ pub mod market {
             index_price: u128,
         ) -> sails_rs::client::PendingCall<io::UpdatePrice, Self::Env>;
         fn config(&self) -> sails_rs::client::PendingCall<io::Config, Self::Env>;
+        fn fee_config(&self) -> sails_rs::client::PendingCall<io::FeeConfig, Self::Env>;
+        fn funding_skew(&self) -> sails_rs::client::PendingCall<io::FundingSkew, Self::Env>;
+        fn liquidation_fraction_bps(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::LiquidationFractionBps, Self::Env>;
+        fn liquidation_penalty_bps(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::LiquidationPenaltyBps, Self::Env>;
         fn market_state(&self) -> sails_rs::client::PendingCall<io::MarketState, Self::Env>;
+        fn oi_cap(&self) -> sails_rs::client::PendingCall<io::OiCap, Self::Env>;
         fn position(
             &self,
             position_id: u64,
@@ -86,6 +128,7 @@ pub mod market {
             &self,
             trader: ActorId,
         ) -> sails_rs::client::PendingCall<io::Positions, Self::Env>;
+        fn price_guard(&self) -> sails_rs::client::PendingCall<io::PriceGuard, Self::Env>;
     }
     pub struct MarketImpl;
     impl<E: sails_rs::client::GearEnv> Market for sails_rs::client::Service<MarketImpl, E> {
@@ -116,9 +159,40 @@ pub mod market {
             size: u128,
             leverage: u16,
             margin: u128,
-            _max_slippage_bps: u16,
+            max_slippage_bps: u16,
         ) -> sails_rs::client::PendingCall<io::OpenPosition, Self::Env> {
-            self.pending_call((side, size, leverage, margin, _max_slippage_bps))
+            self.pending_call((side, size, leverage, margin, max_slippage_bps))
+        }
+        fn set_fees(
+            &mut self,
+            taker_fee_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetFees, Self::Env> {
+            self.pending_call((taker_fee_bps,))
+        }
+        fn set_funding_skew(
+            &mut self,
+            coefficient_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetFundingSkew, Self::Env> {
+            self.pending_call((coefficient_bps,))
+        }
+        fn set_liquidation_config(
+            &mut self,
+            penalty_bps: u16,
+            fraction_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetLiquidationConfig, Self::Env> {
+            self.pending_call((penalty_bps, fraction_bps))
+        }
+        fn set_oi_cap(
+            &mut self,
+            max_oi_per_side: u128,
+        ) -> sails_rs::client::PendingCall<io::SetOiCap, Self::Env> {
+            self.pending_call((max_oi_per_side,))
+        }
+        fn set_price_guard(
+            &mut self,
+            max_price_deviation_bps: u16,
+        ) -> sails_rs::client::PendingCall<io::SetPriceGuard, Self::Env> {
+            self.pending_call((max_price_deviation_bps,))
         }
         fn settle_funding(
             &mut self,
@@ -135,7 +209,26 @@ pub mod market {
         fn config(&self) -> sails_rs::client::PendingCall<io::Config, Self::Env> {
             self.pending_call(())
         }
+        fn fee_config(&self) -> sails_rs::client::PendingCall<io::FeeConfig, Self::Env> {
+            self.pending_call(())
+        }
+        fn funding_skew(&self) -> sails_rs::client::PendingCall<io::FundingSkew, Self::Env> {
+            self.pending_call(())
+        }
+        fn liquidation_fraction_bps(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::LiquidationFractionBps, Self::Env> {
+            self.pending_call(())
+        }
+        fn liquidation_penalty_bps(
+            &self,
+        ) -> sails_rs::client::PendingCall<io::LiquidationPenaltyBps, Self::Env> {
+            self.pending_call(())
+        }
         fn market_state(&self) -> sails_rs::client::PendingCall<io::MarketState, Self::Env> {
+            self.pending_call(())
+        }
+        fn oi_cap(&self) -> sails_rs::client::PendingCall<io::OiCap, Self::Env> {
             self.pending_call(())
         }
         fn position(
@@ -150,6 +243,9 @@ pub mod market {
         ) -> sails_rs::client::PendingCall<io::Positions, Self::Env> {
             self.pending_call((trader,))
         }
+        fn price_guard(&self) -> sails_rs::client::PendingCall<io::PriceGuard, Self::Env> {
+            self.pending_call(())
+        }
     }
 
     pub mod io {
@@ -157,13 +253,24 @@ pub mod market {
         sails_rs::io_struct_impl!(AddMargin (position_id: u64, amount: u128) -> super::OpenPosition);
         sails_rs::io_struct_impl!(CheckLiquidation (trader: ActorId) -> bool);
         sails_rs::io_struct_impl!(ClosePosition (position_id: u64, size: u128) -> super::ClosedPosition);
-        sails_rs::io_struct_impl!(OpenPosition (side: super::Side, size: u128, leverage: u16, margin: u128, _max_slippage_bps: u16) -> super::OpenPosition);
+        sails_rs::io_struct_impl!(OpenPosition (side: super::Side, size: u128, leverage: u16, margin: u128, max_slippage_bps: u16) -> super::OpenPosition);
+        sails_rs::io_struct_impl!(SetFees (taker_fee_bps: u16) -> u16);
+        sails_rs::io_struct_impl!(SetFundingSkew (coefficient_bps: u16) -> u16);
+        sails_rs::io_struct_impl!(SetLiquidationConfig (penalty_bps: u16, fraction_bps: u16) -> ());
+        sails_rs::io_struct_impl!(SetOiCap (max_oi_per_side: u128) -> u128);
+        sails_rs::io_struct_impl!(SetPriceGuard (max_price_deviation_bps: u16) -> u16);
         sails_rs::io_struct_impl!(SettleFunding () -> super::MarketSnapshot);
         sails_rs::io_struct_impl!(UpdatePrice (mark_price: u128, index_price: u128) -> super::MarketSnapshot);
         sails_rs::io_struct_impl!(Config () -> super::MarketConfig);
+        sails_rs::io_struct_impl!(FeeConfig () -> u16);
+        sails_rs::io_struct_impl!(FundingSkew () -> u16);
+        sails_rs::io_struct_impl!(LiquidationFractionBps () -> u16);
+        sails_rs::io_struct_impl!(LiquidationPenaltyBps () -> u16);
         sails_rs::io_struct_impl!(MarketState () -> super::MarketSnapshot);
+        sails_rs::io_struct_impl!(OiCap () -> u128);
         sails_rs::io_struct_impl!(Position (position_id: u64) -> super::PositionLookup);
         sails_rs::io_struct_impl!(Positions (trader: ActorId) -> Vec<super::OpenPosition>);
+        sails_rs::io_struct_impl!(PriceGuard () -> u16);
     }
 }
 #[derive(PartialEq, Clone, Debug, Encode, Decode, TypeInfo)]

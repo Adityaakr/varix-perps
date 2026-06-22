@@ -34,10 +34,6 @@ export function NavBar({
     <header className="nav">
       <div className="nav-brand">
         <VarixLogo />
-        <div className="brand-copy">
-          <span className="brand-subtitle">Perpetual DEX</span>
-          <strong>{tradeMode === "vara" ? "Trade global markets on Vara" : "Trade global markets on Vara.eth"}</strong>
-        </div>
       </div>
       <nav className="nav-links" aria-label="Primary">
         <button className="nav-link is-active" type="button">Trade</button>

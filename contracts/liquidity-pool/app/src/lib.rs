@@ -53,6 +53,8 @@ pub struct LiquidityPoolState {
     total_liquidity: u128,
     total_shares: u128,
     reserved_notional: u128,
+    total_fees_collected: u128,
+    insurance_fund: u128,
     providers: BTreeMap<ActorId, LpAccount>,
     authorized_markets: BTreeMap<ActorId, bool>,
 }
@@ -280,6 +282,64 @@ impl PoolService<'_> {
         Ok(snapshot)
     }
 
+    /// Credit a trading fee to the pool. Tokens have already been transferred in
+    /// by the margin vault; this records the fee as realized LP yield by growing
+    /// `total_liquidity` without minting shares, so every existing provider's
+    /// share value rises. Callable only by an authorized market.
+    #[export(unwrap_result)]
+    pub fn collect_fee(&mut self, amount: u128) -> Result<PoolState, PoolError> {
+        PoolService::require_positive(amount)?;
+        let mut state = self.state.borrow_mut();
+        PoolService::require_market(&state)?;
+        state.total_liquidity = state.total_liquidity.saturating_add(amount);
+        state.total_fees_collected = state.total_fees_collected.saturating_add(amount);
+        let snapshot = PoolState {
+            total_liquidity: state.total_liquidity,
+            total_shares: state.total_shares,
+            reserved_notional: state.reserved_notional,
+            max_capacity: PoolService::max_capacity(&state),
+        };
+        Ok(snapshot)
+    }
+
+    #[export]
+    pub fn fees_collected(&self) -> u128 {
+        self.state.borrow().total_fees_collected
+    }
+
+    /// Earmark tokens already transferred into the pool (a liquidation penalty)
+    /// as insurance-fund balance, held separately from LP liquidity. Callable
+    /// only by an authorized market.
+    #[export(unwrap_result)]
+    pub fn fund_insurance(&mut self, amount: u128) -> Result<u128, PoolError> {
+        PoolService::require_positive(amount)?;
+        let mut state = self.state.borrow_mut();
+        PoolService::require_market(&state)?;
+        state.insurance_fund = state.insurance_fund.saturating_add(amount);
+        Ok(state.insurance_fund)
+    }
+
+    /// Reimburse LP liquidity for bad debt out of the insurance fund. Moves up to
+    /// `amount` (capped at the available insurance balance) from the insurance
+    /// bucket back into `total_liquidity`; both sit in the same token custody, so
+    /// this is pure accounting. Returns the amount actually covered. Callable
+    /// only by an authorized market.
+    #[export(unwrap_result)]
+    pub fn cover_bad_debt(&mut self, amount: u128) -> Result<u128, PoolError> {
+        PoolService::require_positive(amount)?;
+        let mut state = self.state.borrow_mut();
+        PoolService::require_market(&state)?;
+        let covered = amount.min(state.insurance_fund);
+        state.insurance_fund -= covered;
+        state.total_liquidity = state.total_liquidity.saturating_add(covered);
+        Ok(covered)
+    }
+
+    #[export]
+    pub fn insurance_balance(&self) -> u128 {
+        self.state.borrow().insurance_fund
+    }
+
     #[export]
     pub fn account(&self, provider: ActorId) -> LpAccount {
         self.state
@@ -320,6 +380,8 @@ impl Program {
                 total_liquidity: 0,
                 total_shares: 0,
                 reserved_notional: 0,
+                total_fees_collected: 0,
+                insurance_fund: 0,
                 providers: BTreeMap::new(),
                 authorized_markets: BTreeMap::new(),
             }),

@@ -1,13 +1,13 @@
-type LpAccount = struct {
-  shares: u128,
-  deposited: u128,
-};
-
 type PoolState = struct {
   total_liquidity: u128,
   total_shares: u128,
   reserved_notional: u128,
   max_capacity: u128,
+};
+
+type LpAccount = struct {
+  shares: u128,
+  deposited: u128,
 };
 
 constructor {
@@ -16,13 +16,30 @@ constructor {
 
 service Pool {
   AuthorizeMarket : (market: actor_id) -> null;
+  /// Credit a trading fee to the pool. Tokens have already been transferred in
+  /// by the margin vault; this records the fee as realized LP yield by growing
+  /// `total_liquidity` without minting shares, so every existing provider's
+  /// share value rises. Callable only by an authorized market.
+  CollectFee : (amount: u128) -> PoolState;
+  /// Reimburse LP liquidity for bad debt out of the insurance fund. Moves up to
+  /// `amount` (capped at the available insurance balance) from the insurance
+  /// bucket back into `total_liquidity`; both sit in the same token custody, so
+  /// this is pure accounting. Returns the amount actually covered. Callable
+  /// only by an authorized market.
+  CoverBadDebt : (amount: u128) -> u128;
   DepositLiquidity : (amount: u128) -> LpAccount;
+  /// Earmark tokens already transferred into the pool (a liquidation penalty)
+  /// as insurance-fund balance, held separately from LP liquidity. Callable
+  /// only by an authorized market.
+  FundInsurance : (amount: u128) -> u128;
   PayOutToVault : (vault: actor_id, amount: u128) -> PoolState;
   ReleaseNotional : (amount: u128) -> PoolState;
   ReserveNotional : (amount: u128) -> PoolState;
   RevokeMarket : (market: actor_id) -> null;
   WithdrawLiquidity : (shares: u128) -> LpAccount;
   query Account : (provider: actor_id) -> LpAccount;
+  query FeesCollected : () -> u128;
+  query InsuranceBalance : () -> u128;
   query PoolState : () -> PoolState;
 };
 

@@ -51,6 +51,15 @@ pub mod vault {
             &mut self,
             market: ActorId,
         ) -> sails_rs::client::PendingCall<io::AuthorizeMarket, Self::Env>;
+        /// Deduct a trading fee from a trader's free balance and forward the tokens
+        /// to the liquidity pool. Called by an authorized market on trade execution.
+        /// Strict: fails if the trader's free balance cannot cover the full fee.
+        fn charge_fee(
+            &mut self,
+            trader: ActorId,
+            amount: u128,
+            pool: ActorId,
+        ) -> sails_rs::client::PendingCall<io::ChargeFee, Self::Env>;
         fn deposit(
             &mut self,
             amount: u128,
@@ -98,6 +107,14 @@ pub mod vault {
             market: ActorId,
         ) -> sails_rs::client::PendingCall<io::AuthorizeMarket, Self::Env> {
             self.pending_call((market,))
+        }
+        fn charge_fee(
+            &mut self,
+            trader: ActorId,
+            amount: u128,
+            pool: ActorId,
+        ) -> sails_rs::client::PendingCall<io::ChargeFee, Self::Env> {
+            self.pending_call((trader, amount, pool))
         }
         fn deposit(
             &mut self,
@@ -162,6 +179,7 @@ pub mod vault {
     pub mod io {
         use super::*;
         sails_rs::io_struct_impl!(AuthorizeMarket (market: ActorId) -> ());
+        sails_rs::io_struct_impl!(ChargeFee (trader: ActorId, amount: u128, pool: ActorId) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(Deposit (amount: u128) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(LockMargin (trader: ActorId, amount: u128) -> super::AccountSnapshot);
         sails_rs::io_struct_impl!(ReleaseMargin (trader: ActorId, amount: u128) -> super::AccountSnapshot);

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { describeActionError } from "../lib/errors";
 import type { AccountSnapshot } from "../types";
 
 type AccountPanelProps = {
@@ -79,6 +80,8 @@ export function AccountPanel({
       } else {
         await onWithdraw(amount);
       }
+    } catch (error) {
+      setValidationError(describeActionError(error));
     } finally {
       setBusyAction(null);
     }

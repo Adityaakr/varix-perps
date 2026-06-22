@@ -73,12 +73,35 @@ service Market {
   AddMargin : (position_id: u64, amount: u128) -> OpenPosition;
   CheckLiquidation : (trader: actor_id) -> bool;
   ClosePosition : (position_id: u64, size: u128) -> ClosedPosition;
-  OpenPosition : (side: Side, size: u128, leverage: u16, margin: u128, _max_slippage_bps: u16) -> OpenPosition;
+  OpenPosition : (side: Side, size: u128, leverage: u16, margin: u128, max_slippage_bps: u16) -> OpenPosition;
+  /// Owner-only: set the taker fee (basis points of traded notional) charged on
+  /// position opens. `0` disables fees.
+  SetFees : (taker_fee_bps: u16) -> u16;
+  /// Owner-only: set the funding skew coefficient (basis points applied at a
+  /// fully one-sided book). `0` falls back to pure premium funding.
+  SetFundingSkew : (coefficient_bps: u16) -> u16;
+  /// Owner-only: configure liquidations. `penalty_bps` is charged on the
+  /// liquidated notional and routed to the insurance fund; `fraction_bps` is
+  /// the share of a position closed per liquidation call (`0` or `>= 10_000`
+  /// closes the whole position).
+  SetLiquidationConfig : (penalty_bps: u16, fraction_bps: u16) -> null;
+  /// Owner-only: cap the open interest allowed on each side of the book. `0`
+  /// means uncapped.
+  SetOiCap : (max_oi_per_side: u128) -> u128;
+  /// Owner-only: bound how far a single `update_price` may move the mark/index
+  /// from the previous value, in basis points. `0` disables the circuit breaker.
+  SetPriceGuard : (max_price_deviation_bps: u16) -> u16;
   SettleFunding : () -> MarketSnapshot;
   UpdatePrice : (mark_price: u128, index_price: u128) -> MarketSnapshot;
   query Config : () -> MarketConfig;
+  query FeeConfig : () -> u16;
+  query FundingSkew : () -> u16;
+  query LiquidationFractionBps : () -> u16;
+  query LiquidationPenaltyBps : () -> u16;
   query MarketState : () -> MarketSnapshot;
+  query OiCap : () -> u128;
   query Position : (position_id: u64) -> PositionLookup;
   query Positions : (trader: actor_id) -> vec OpenPosition;
+  query PriceGuard : () -> u16;
 };
 

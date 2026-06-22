@@ -14,6 +14,10 @@ constructor {
 
 service Vault {
   AuthorizeMarket : (market: actor_id) -> null;
+  /// Deduct a trading fee from a trader's free balance and forward the tokens
+  /// to the liquidity pool. Called by an authorized market on trade execution.
+  /// Strict: fails if the trader's free balance cannot cover the full fee.
+  ChargeFee : (trader: actor_id, amount: u128, pool: actor_id) -> AccountSnapshot;
   Deposit : (amount: u128) -> AccountSnapshot;
   LockMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
   ReleaseMargin : (trader: actor_id, amount: u128) -> AccountSnapshot;
